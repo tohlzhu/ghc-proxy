@@ -1,4 +1,11 @@
-# GHC Proxy 示例代码与配置
+# GHC Proxy 示例代码与配置（早期 TypeScript 骨架 · 已被实现取代）
+
+> ⚠️ **本目录是早期的 TypeScript 说明性骨架，已被仓库根的完整 Python 实现取代。**
+> 实际运行代码见 [`../src/ghcproxy/`](../src/ghcproxy/)，部署见 [`../deploy/`](../deploy/)，
+> 索引见 [`../ghc-proxy-design.md`](../ghc-proxy-design.md) §10。本目录仅留作设计对照，**勿用于生产**。
+>
+> 注意：此处早期片段假设「`gho_` → 短效 copilot token 两段式换取」，
+> 实测已修正为「`gho_` 直接作 Bearer」（见设计文档 §2.1）。
 
 > 配合设计文档 [`../ghc-proxy-design.md`](../ghc-proxy-design.md) 阅读。
 > 这些是**说明性骨架/片段**，展示关键机制（token 交换、主动刷新、1:1 绑定、协议转换、部署），
