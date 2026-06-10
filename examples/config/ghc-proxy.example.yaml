@@ -1,0 +1,52 @@
+# GHC Proxy 运行配置示例 —— 全部为占位符，请勿写入真实密钥 / 租户 ID / token。
+# 实际部署时建议用环境变量 / K8s Secret 覆盖敏感项。
+
+server:
+  port: 8080
+  maxUsersPerAccount: 1        # 强制 1:1 绑定
+
+github:
+  apiBase: "https://api.github.com"
+  tokenExchangePath: "/copilot_internal/v2/token"
+  clientId: "Iv1.<CLIENT_ID>"  # GHC 客户端公开 OAuth App ID（占位）
+  scope: "read:user"
+
+# 调用模型 API 时附带的客户端 header（取值随客户端版本演进）
+upstreamHeaders:
+  Editor-Version: "vscode/1.95.0"
+  Editor-Plugin-Version: "copilot-chat/0.26.7"
+  Copilot-Integration-Id: "vscode-chat"
+  X-GitHub-Api-Version: "2025-04-01"
+  User-Agent: "GitHubCopilotChat/0.26.7"
+
+refresh:
+  skewSeconds: 120             # 过期前预留刷新窗口
+  scanIntervalMs: 30000        # Refresher 扫描周期
+  lockTtlSeconds: 15           # 每账号刷新锁时长
+
+postgres:
+  url: "postgres://USER:PASS@PG_HOST:5432/ghcproxy"
+
+redis:
+  url: "redis://REDIS_HOST:6379/0"
+
+kafka:
+  brokers: ["KAFKA_HOST:9092"]
+  topics:
+    prompts: "ghcproxy.prompts"
+    usage: "ghcproxy.usage"
+    audit: "ghcproxy.audit"
+
+crypto:
+  # 32 字节数据密钥（base64）。生产请用 KMS 信封加密下发，切勿硬编码真实值。
+  dataKeyB64: "<BASE64_32_BYTE_KEY_PLACEHOLDER>"
+
+# 需加入防火墙/代理白名单的域名（HTTPS/443）—— 见 ghc-proxy-design.md 2.6
+allowlist:
+  - "https://github.com/login/*"
+  - "https://api.github.com/user"
+  - "https://api.github.com/copilot_internal/*"
+  - "https://*.githubcopilot.com/*"
+  - "https://copilot-proxy.githubusercontent.com"
+  - "https://origin-tracker.githubusercontent.com"
+  - "https://copilot-telemetry.githubusercontent.com/telemetry"

@@ -1,0 +1,20 @@
+{
+  "name": "ghc-proxy-examples",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Illustrative TypeScript snippets for the GHC Proxy design (placeholders only).",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/pg": "^8.11.0",
+    "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "fastify": "^4.26.0",
+    "ioredis": "^5.3.2",
+    "pg": "^8.11.3"
+  }
+}

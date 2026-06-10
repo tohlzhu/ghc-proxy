@@ -1,0 +1,83 @@
+# proxy 角色：无状态，水平扩展（HPA）。占位镜像 / Secret。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ghc-proxy
+  labels: { app: ghc-proxy, role: proxy }
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app: ghc-proxy, role: proxy }
+  template:
+    metadata:
+      labels: { app: ghc-proxy, role: proxy }
+    spec:
+      containers:
+        - name: proxy
+          image: REGISTRY/ghc-proxy:TAG     # 占位
+          # 入口需把 buildServer() 的依赖（鉴权、loadGhoToken、Kafka 生产者）装配好再 listen。
+          # 示例中 src/proxy/server.ts 只导出 buildServer 工厂；此处为占位入口名。
+          args: ["node", "dist/proxy/main.js"]
+          env:
+            - name: ROLE
+              value: "proxy"
+            - name: DATABASE_URL
+              valueFrom: { secretKeyRef: { name: ghc-proxy-secrets, key: database-url } }
+            - name: REDIS_URL
+              valueFrom: { secretKeyRef: { name: ghc-proxy-secrets, key: redis-url } }
+            - name: KAFKA_BROKERS
+              valueFrom: { secretKeyRef: { name: ghc-proxy-secrets, key: kafka-brokers } }
+            - name: GHC_DATA_KEY_B64
+              valueFrom: { secretKeyRef: { name: ghc-proxy-secrets, key: data-key-b64 } }
+          ports: [{ containerPort: 8080 }]
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests: { cpu: "250m", memory: "256Mi" }
+            limits:   { cpu: "1",    memory: "512Mi" }
+          # 优雅退出：drain 在途流式请求。
+          lifecycle:
+            preStop: { exec: { command: ["sleep", "10"] } }
+      terminationGracePeriodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ghc-proxy
+spec:
+  selector: { app: ghc-proxy, role: proxy }
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ghc-proxy
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: ghc-proxy }
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 65 }
+---
+# 占位 Secret —— 真实值通过 CI/CD 或 External Secrets 注入，切勿提交到仓库。
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ghc-proxy-secrets
+type: Opaque
+stringData:
+  database-url: "postgres://USER:PASS@PG_HOST:5432/ghcproxy"
+  redis-url: "redis://REDIS_HOST:6379/0"
+  kafka-brokers: "KAFKA_HOST:9092"
+  data-key-b64: "<BASE64_32_BYTE_KEY_PLACEHOLDER>"
