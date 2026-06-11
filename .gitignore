@@ -221,3 +221,8 @@ __marimo__/
 .deploy-env
 *.heartbeat
 /tmp/
+
+# Admin Console (frontend) build artifacts — never commit
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
