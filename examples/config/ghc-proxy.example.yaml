@@ -1,47 +1,62 @@
 # GHC Proxy 运行配置示例 —— 全部为占位符，请勿写入真实密钥 / 租户 ID / token。
 # 实际部署时建议用环境变量 / K8s Secret 覆盖敏感项。
+# 字段名与 src/ghcproxy/common/config.py 的 pydantic 模型一一对应（snake_case）。
+# 环境变量覆盖：GHCPROXY_<SECTION>__<FIELD>，如 GHCPROXY_UPSTREAM__EDITOR_VERSION。
 
 server:
   port: 8080
-  maxUsersPerAccount: 1        # 强制 1:1 绑定
+  max_users_per_account: 1     # 强制 1:1 绑定
 
-github:
-  apiBase: "https://api.github.com"
-  tokenExchangePath: "/copilot_internal/v2/token"
-  clientId: "Iv1.<CLIENT_ID>"  # GHC 客户端公开 OAuth App ID（占位）
+# 操作人员 Device Flow 登录所用的公开 OAuth 客户端（非密钥）。
+# 两种客户端决定 token 形态与认证方式（token service 两条路径都支持）：
+#   * 编辑器 GitHub App（如 Iv1.b507a08c87ecfe98）→ 颁发 ghu_，必须经
+#     copilot_internal/v2/token 换取 ~30 分钟短效 token B；
+#   * CLI OAuth App（Ov23...）→ 颁发 gho_，直接作 Bearer（换取端点返回 404）。
+device_flow:
+  client_id: "Iv1.<CLIENT_ID>"   # 占位；按部署选择编辑器或 CLI 客户端 ID
   scope: "read:user"
+  device_code_url: "https://github.com/login/device/code"
+  access_token_url: "https://github.com/login/oauth/access_token"
 
-# 调用模型 API 时附带的客户端 header（取值随客户端版本演进）
-upstreamHeaders:
-  Editor-Version: "vscode/1.95.0"
-  Editor-Plugin-Version: "copilot-chat/0.26.7"
-  Copilot-Integration-Id: "vscode-chat"
-  X-GitHub-Api-Version: "2025-04-01"
-  User-Agent: "GitHubCopilotChat/0.26.7"
+# 调用模型 API 时附带的客户端身份 header（取值随客户端版本演进，全部可配）。
+# 正确构造这些 header 直接影响 prompt cache 命中率与异常检测，详见 §2.5。
+upstream:
+  default_api_base: "https://api.enterprise.githubcopilot.com"
+  github_api_base: "https://api.github.com"
+  token_exchange_path: "/copilot_internal/v2/token"  # 换取短效 token B；404 → 直连回退
+  integration_id: "copilot-developer-cli"
+  editor_version: "copilot/1.0.61"
+  editor_plugin_version: "copilot/1.0.61"
+  api_version: "2026-06-01"
+  anthropic_version: "2023-06-01"
+  user_agent: "GitHubCopilotChat/0.26.7"
+  openai_intent: "conversation-panel"
 
 refresh:
-  skewSeconds: 120             # 过期前预留刷新窗口
-  scanIntervalMs: 30000        # Refresher 扫描周期
-  lockTtlSeconds: 15           # 每账号刷新锁时长
+  scan_interval_s: 60          # Refresher 扫描周期
+  lock_ttl_s: 30               # 每账号刷新锁时长
+  liveness_skew_s: 120         # token B 过期前预留的刷新窗口
+  revalidate_interval_s: 1800  # 即使不报错也定期复核的间隔
 
 postgres:
-  url: "postgres://USER:PASS@PG_HOST:5432/ghcproxy"
+  url: "postgresql://USER:PASS@PG_HOST:5432/ghcproxy"
 
 redis:
   url: "redis://REDIS_HOST:6379/0"
 
 kafka:
+  enabled: true
   brokers: ["KAFKA_HOST:9092"]
-  topics:
-    prompts: "ghcproxy.prompts"
-    usage: "ghcproxy.usage"
-    audit: "ghcproxy.audit"
+  topic_prompts: "ghcproxy.prompts"
+  topic_usage: "ghcproxy.usage"
+  topic_audit: "ghcproxy.audit"
 
 crypto:
   # 32 字节数据密钥（base64）。生产请用 KMS 信封加密下发，切勿硬编码真实值。
-  dataKeyB64: "<BASE64_32_BYTE_KEY_PLACEHOLDER>"
+  data_key_b64: "<BASE64_32_BYTE_KEY_PLACEHOLDER>"
 
-# 需加入防火墙/代理白名单的域名（HTTPS/443）—— 见 ghc-proxy-design.md 2.6
+# 需加入防火墙/代理白名单的域名（HTTPS/443）—— 见 ghc-proxy-design.md §2.6
+# 注意：token 换取走 api.github.com/copilot_internal/*，编辑器客户端模式必须放行。
 allowlist:
   - "https://github.com/login/*"
   - "https://api.github.com/user"
