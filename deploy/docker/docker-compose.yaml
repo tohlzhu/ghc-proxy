@@ -1,0 +1,89 @@
+# Full local/VM stack: PostgreSQL + Redis + Kafka + proxy + refresher.
+# Placeholder credentials only — override via .env in real use.
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ghcproxy
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-ghcproxy_dev_pw}
+      POSTGRES_DB: ghcproxy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ghcproxy"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    ports: ["5432:5432"]
+
+  redis:
+    image: redis:7
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    ports: ["6379:6379"]
+
+  kafka:
+    image: apache/kafka:3.9.0
+    # Dual listener: INTERNAL (kafka:9092) for in-network clients (proxy
+    # container), HOST (localhost:29092) for clients on the docker host.
+    ports: ["29092:29092"]
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_LISTENERS: "INTERNAL://:9092,HOST://:29092,CONTROLLER://:9093"
+      KAFKA_ADVERTISED_LISTENERS: "INTERNAL://kafka:9092,HOST://localhost:29092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "INTERNAL:PLAINTEXT,HOST:PLAINTEXT,CONTROLLER:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "INTERNAL"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  proxy:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+    environment:
+      ROLE: proxy
+      GHCPROXY_INIT_SCHEMA: "1"
+      GHCPROXY_ADMIN_TOKEN: ${ADMIN_TOKEN:-dev_admin_token}
+      GHCPROXY_POSTGRES__URL: postgresql://ghcproxy:${PG_PASSWORD:-ghcproxy_dev_pw}@postgres:5432/ghcproxy
+      GHCPROXY_REDIS__URL: redis://redis:6379/0
+      GHCPROXY_KAFKA__BROKERS: '["kafka:9092"]'
+      GHCPROXY_CRYPTO__DATA_KEY_B64: ${DATA_KEY_B64:-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}
+    ports: ["8080:8080"]
+
+  refresher:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    environment:
+      ROLE: refresher
+      GHCPROXY_POSTGRES__URL: postgresql://ghcproxy:${PG_PASSWORD:-ghcproxy_dev_pw}@postgres:5432/ghcproxy
+      GHCPROXY_REDIS__URL: redis://redis:6379/0
+      GHCPROXY_KAFKA__BROKERS: '["kafka:9092"]'
+      GHCPROXY_CRYPTO__DATA_KEY_B64: ${DATA_KEY_B64:-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}
+    # The refresher is a worker, not an HTTP server: override the image's
+    # HTTP healthcheck with a heartbeat-freshness check (the loop rewrites the
+    # heartbeat file each tick; stale => unhealthy).
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,time,sys; p=os.environ.get('GHCPROXY_REFRESHER_HEARTBEAT','/tmp/ghcproxy-refresher.heartbeat'); sys.exit(0 if os.path.exists(p) and time.time()-os.path.getmtime(p) < 180 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

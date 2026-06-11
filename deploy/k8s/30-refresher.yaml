@@ -1,0 +1,41 @@
+# refresher role: single-writer-per-account liveness worker.
+# Kept at 1 replica; the Redis per-account lock makes >1 safe but unnecessary.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ghc-proxy-refresher
+  namespace: ghc-proxy
+  labels: { app: ghc-proxy, role: refresher }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: ghc-proxy, role: refresher }
+  template:
+    metadata:
+      labels: { app: ghc-proxy, role: refresher }
+    spec:
+      containers:
+        - name: refresher
+          image: REGISTRY/ghc-proxy:TAG        # set by CI
+          env:
+            - name: ROLE
+              value: "refresher"
+          envFrom:
+            - configMapRef: { name: ghc-proxy-config }
+            - secretRef: { name: ghc-proxy-secrets }
+          # heartbeat-freshness liveness (the worker rewrites it each tick)
+          livenessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - |
+                  import os,time,sys
+                  p=os.environ.get('GHCPROXY_REFRESHER_HEARTBEAT','/tmp/ghcproxy-refresher.heartbeat')
+                  sys.exit(0 if os.path.exists(p) and time.time()-os.path.getmtime(p) < 180 else 1)
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+            requests: { cpu: "100m", memory: "128Mi" }
+            limits:   { cpu: "500m", memory: "256Mi" }

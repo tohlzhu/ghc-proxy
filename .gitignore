@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# GHC Proxy — local/deploy artifacts (never commit secrets)
+.deploy-env
+*.heartbeat
+/tmp/
