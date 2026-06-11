@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -19,6 +19,12 @@ from ghcproxy.credential.device_flow import (
     DeviceFlowError,
     SlowDown,
 )
+
+# Account statuses an operator may set directly from the console. Lifecycle
+# states (logging_in/bound) are owned by the system, not the operator.
+_OPERATOR_ACCOUNT_STATUSES = {"idle", "disabled", "quarantined"}
+_USER_STATUSES = {"active", "disabled"}
+_DEFAULT_WINDOW_DAYS = 30
 
 
 class ImportAccountReq(BaseModel):
@@ -33,8 +39,34 @@ class CreateUserReq(BaseModel):
     display_name: str | None = None
 
 
+class CreateKeyReq(BaseModel):
+    name: str | None = None
+    scopes: list[str] | None = None
+    rate_limit: int | None = None
+
+
+class UserStatusReq(BaseModel):
+    status: str
+
+
+class AccountStatusReq(BaseModel):
+    status: str
+
+
 class StartLoginReq(BaseModel):
     login: str
+
+
+def _parse_window(date_from: str | None, date_to: str | None) -> tuple[dt.date, dt.date]:
+    """Resolve the (from, to) date window, defaulting to the last 30 days."""
+    today = dt.datetime.now(dt.timezone.utc).date()
+    try:
+        to = dt.date.fromisoformat(date_to) if date_to else today
+        frm = (dt.date.fromisoformat(date_from) if date_from
+               else to - dt.timedelta(days=_DEFAULT_WINDOW_DAYS - 1))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid date") from exc
+    return frm, to
 
 
 def build_admin_router(ctx) -> APIRouter:
@@ -71,6 +103,121 @@ def build_admin_router(ctx) -> APIRouter:
         key_id = await ctx.repo.add_api_key(user_id, hash_api_key(key), name="default")
         # plaintext key returned exactly once
         return {"user_id": user_id, "api_key_id": key_id, "api_key": key}
+
+    # ---- usage analytics (read-only over usage_rollup) ------------------
+    @router.get("/usage/timeseries")
+    async def usage_timeseries(
+            x_admin_token: str | None = Header(default=None),
+            date_from: str | None = Query(default=None, alias="from"),
+            date_to: str | None = Query(default=None, alias="to")):
+        require_admin(x_admin_token)
+        frm, to = _parse_window(date_from, date_to)
+        return await ctx.repo.usage_timeseries(frm, to)
+
+    @router.get("/usage/by-user")
+    async def usage_by_user(
+            x_admin_token: str | None = Header(default=None),
+            date_from: str | None = Query(default=None, alias="from"),
+            date_to: str | None = Query(default=None, alias="to")):
+        require_admin(x_admin_token)
+        frm, to = _parse_window(date_from, date_to)
+        return await ctx.repo.usage_by_user(frm, to)
+
+    @router.get("/usage/by-account")
+    async def usage_by_account(
+            x_admin_token: str | None = Header(default=None),
+            date_from: str | None = Query(default=None, alias="from"),
+            date_to: str | None = Query(default=None, alias="to")):
+        require_admin(x_admin_token)
+        frm, to = _parse_window(date_from, date_to)
+        return await ctx.repo.usage_by_account(frm, to)
+
+    @router.get("/usage/by-model")
+    async def usage_by_model(
+            x_admin_token: str | None = Header(default=None),
+            date_from: str | None = Query(default=None, alias="from"),
+            date_to: str | None = Query(default=None, alias="to")):
+        require_admin(x_admin_token)
+        frm, to = _parse_window(date_from, date_to)
+        return await ctx.repo.usage_by_model(frm, to)
+
+    # ---- users & keys ---------------------------------------------------
+    @router.get("/users")
+    async def list_users(x_admin_token: str | None = Header(default=None)):
+        require_admin(x_admin_token)
+        # repo returns key METADATA only (no plaintext, no hash)
+        return await ctx.repo.list_users_with_keys()
+
+    @router.patch("/users/{user_id}")
+    async def set_user_status(user_id: str, req: UserStatusReq,
+                              x_admin_token: str | None = Header(default=None)):
+        require_admin(x_admin_token)
+        if req.status not in _USER_STATUSES:
+            raise HTTPException(status_code=400, detail="invalid user status")
+        ok = await ctx.repo.set_user_status(user_id, req.status)
+        if not ok:
+            raise HTTPException(status_code=404, detail="user not found")
+        return {"user_id": user_id, "status": req.status}
+
+    @router.post("/users/{user_id}/keys")
+    async def issue_key(user_id: str, req: CreateKeyReq,
+                        x_admin_token: str | None = Header(default=None)):
+        require_admin(x_admin_token)
+        key = generate_api_key()
+        key_id = await ctx.repo.add_api_key(
+            user_id, hash_api_key(key), name=req.name,
+            scopes=req.scopes, rate_limit=req.rate_limit)
+        # plaintext key returned exactly once
+        return {"user_id": user_id, "api_key_id": key_id, "name": req.name,
+                "api_key": key}
+
+    @router.post("/keys/{key_id}/rotate")
+    async def rotate_key(key_id: str,
+                         x_admin_token: str | None = Header(default=None)):
+        require_admin(x_admin_token)
+        meta = await ctx.repo.get_api_key_meta(key_id)
+        if meta is None:
+            raise HTTPException(status_code=404, detail="key not found")
+        await ctx.repo.revoke_api_key(key_id)
+        key = generate_api_key()
+        new_id = await ctx.repo.add_api_key(
+            meta["user_id"], hash_api_key(key), name=meta["name"],
+            scopes=meta["scopes"], rate_limit=meta["rate_limit"])
+        # plaintext key returned exactly once
+        return {"user_id": meta["user_id"], "api_key_id": new_id,
+                "name": meta["name"], "api_key": key}
+
+    @router.post("/keys/{key_id}/revoke")
+    async def revoke_key(key_id: str,
+                         x_admin_token: str | None = Header(default=None)):
+        require_admin(x_admin_token)
+        ok = await ctx.repo.revoke_api_key(key_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="key not found")
+        return {"api_key_id": key_id, "status": "revoked"}
+
+    # ---- account status & bindings -------------------------------------
+    @router.patch("/accounts/{account_id}/status")
+    async def set_account_status(account_id: str, req: AccountStatusReq,
+                                 x_admin_token: str | None = Header(default=None)):
+        require_admin(x_admin_token)
+        if req.status not in _OPERATOR_ACCOUNT_STATUSES:
+            raise HTTPException(status_code=400, detail="invalid account status")
+        await ctx.repo.set_account_status(account_id, req.status)
+        return {"account_id": account_id, "status": req.status}
+
+    @router.get("/bindings")
+    async def list_bindings(x_admin_token: str | None = Header(default=None)):
+        require_admin(x_admin_token)
+        return await ctx.repo.list_bindings()
+
+    @router.post("/bindings/{user_id}/release")
+    async def release_binding(user_id: str,
+                              x_admin_token: str | None = Header(default=None)):
+        require_admin(x_admin_token)
+        await ctx.repo.release_binding(user_id)
+        await ctx.sink.audit({"event": "binding_released", "user": user_id})
+        return {"user_id": user_id, "status": "released"}
 
     @router.post("/accounts/{login}/login/start")
     async def start_login(login: str,

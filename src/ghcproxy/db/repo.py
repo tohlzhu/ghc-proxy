@@ -218,10 +218,13 @@ class PgRepo:
             "RETURNING id", external_id, display_name)
         return str(row["id"])
 
-    async def add_api_key(self, user_id: str, key_hash: bytes, name: str | None = None) -> str:
+    async def add_api_key(self, user_id: str, key_hash: bytes, name: str | None = None,
+                          scopes: list[str] | None = None,
+                          rate_limit: int | None = None) -> str:
         row = await self._pool.fetchrow(
-            "INSERT INTO api_keys (user_id, key_hash, name) VALUES ($1,$2,$3) RETURNING id",
-            user_id, key_hash, name)
+            "INSERT INTO api_keys (user_id, key_hash, name, scopes, rate_limit) "
+            "VALUES ($1,$2,$3,$4,$5) RETURNING id",
+            user_id, key_hash, name, scopes or [], rate_limit)
         return str(row["id"])
 
     async def user_for_key_hash(self, key_hash: bytes) -> str | None:
@@ -229,6 +232,52 @@ class PgRepo:
             "UPDATE api_keys SET last_used_at=now() WHERE key_hash=$1 AND status='active' "
             "RETURNING user_id", key_hash)
         return str(row["user_id"]) if row else None
+
+    async def set_user_status(self, user_id: str, status: str) -> bool:
+        row = await self._pool.fetchrow(
+            "UPDATE users SET status=$2 WHERE id=$1 RETURNING id", user_id, status)
+        return row is not None
+
+    async def get_api_key_meta(self, key_id: str) -> dict | None:
+        row = await self._pool.fetchrow(
+            "SELECT id, user_id, name, scopes, rate_limit, status "
+            "FROM api_keys WHERE id=$1", key_id)
+        if not row:
+            return None
+        out = dict(row)
+        out["id"] = str(out["id"])
+        out["user_id"] = str(out["user_id"])
+        out["scopes"] = list(out["scopes"] or [])
+        return out
+
+    async def revoke_api_key(self, key_id: str) -> bool:
+        row = await self._pool.fetchrow(
+            "UPDATE api_keys SET status='revoked' WHERE id=$1 RETURNING id", key_id)
+        return row is not None
+
+    async def list_users_with_keys(self) -> list[dict]:
+        rows = await self._pool.fetch(
+            "SELECT u.id AS user_id, u.external_id, u.display_name, u.status, u.created_at, "
+            "       k.id AS key_id, k.name, k.scopes, k.status AS key_status, "
+            "       k.rate_limit, k.created_at AS key_created_at, k.last_used_at "
+            "FROM users u LEFT JOIN api_keys k ON k.user_id = u.id "
+            "ORDER BY u.created_at, k.created_at")
+        users: dict = {}
+        for r in rows:
+            uid = str(r["user_id"])
+            user = users.get(uid)
+            if user is None:
+                user = {"id": uid, "external_id": r["external_id"],
+                        "display_name": r["display_name"], "status": r["status"],
+                        "created_at": r["created_at"], "keys": []}
+                users[uid] = user
+            if r["key_id"] is not None:
+                user["keys"].append({
+                    "id": str(r["key_id"]), "name": r["name"],
+                    "scopes": list(r["scopes"] or []), "status": r["key_status"],
+                    "rate_limit": r["rate_limit"], "created_at": r["key_created_at"],
+                    "last_used_at": r["last_used_at"]})
+        return list(users.values())
 
     # -- usage ------------------------------------------------------------
     async def bump_usage(self, user_id: str, account_id: str | None, model: str,
@@ -245,6 +294,95 @@ class PgRepo:
 
     async def list_accounts(self) -> list[dict]:
         rows = await self._pool.fetch(
-            "SELECT id, login, plan, status, last_error, last_seen_at FROM accounts "
-            "ORDER BY created_at")
-        return [dict(r) for r in rows]
+            "SELECT id, login, plan, api_base, status, last_error, last_seen_at, "
+            "       refresh_at, updated_at "
+            "FROM accounts ORDER BY created_at")
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["id"] = str(d["id"])
+            out.append(d)
+        return out
+
+    async def list_bindings(self) -> list[dict]:
+        rows = await self._pool.fetch(
+            "SELECT b.user_id, u.external_id, b.account_id, a.login, b.status, "
+            "       b.bound_at, b.last_active_at "
+            "FROM bindings b "
+            "JOIN users u ON u.id = b.user_id "
+            "JOIN accounts a ON a.id = b.account_id "
+            "ORDER BY b.bound_at DESC")
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["user_id"] = str(d["user_id"])
+            d["account_id"] = str(d["account_id"])
+            out.append(d)
+        return out
+
+    # -- usage aggregation (read-only over usage_rollup) ------------------
+    async def usage_timeseries(self, date_from: dt.date | None,
+                               date_to: dt.date | None) -> list[dict]:
+        rows = await self._pool.fetch(
+            "SELECT day, "
+            "       SUM(prompt_tokens)::bigint     AS prompt_tokens, "
+            "       SUM(completion_tokens)::bigint AS completion_tokens, "
+            "       SUM(requests)::bigint          AS requests "
+            "FROM usage_rollup "
+            "WHERE ($1::date IS NULL OR day >= $1) AND ($2::date IS NULL OR day <= $2) "
+            "GROUP BY day ORDER BY day", date_from, date_to)
+        return [{"day": r["day"].isoformat(), "prompt_tokens": int(r["prompt_tokens"]),
+                 "completion_tokens": int(r["completion_tokens"]),
+                 "requests": int(r["requests"])} for r in rows]
+
+    async def usage_by_user(self, date_from: dt.date | None,
+                            date_to: dt.date | None) -> list[dict]:
+        rows = await self._pool.fetch(
+            "SELECT ur.user_id, u.external_id, u.display_name, "
+            "       SUM(ur.prompt_tokens)::bigint     AS prompt_tokens, "
+            "       SUM(ur.completion_tokens)::bigint AS completion_tokens, "
+            "       SUM(ur.requests)::bigint          AS requests "
+            "FROM usage_rollup ur LEFT JOIN users u ON u.id = ur.user_id "
+            "WHERE ($1::date IS NULL OR ur.day >= $1) AND ($2::date IS NULL OR ur.day <= $2) "
+            "GROUP BY ur.user_id, u.external_id, u.display_name "
+            "ORDER BY (SUM(ur.prompt_tokens) + SUM(ur.completion_tokens)) DESC",
+            date_from, date_to)
+        return [{"user_id": str(r["user_id"]), "external_id": r["external_id"],
+                 "display_name": r["display_name"],
+                 "prompt_tokens": int(r["prompt_tokens"]),
+                 "completion_tokens": int(r["completion_tokens"]),
+                 "requests": int(r["requests"])} for r in rows]
+
+    async def usage_by_account(self, date_from: dt.date | None,
+                               date_to: dt.date | None) -> list[dict]:
+        rows = await self._pool.fetch(
+            "SELECT ur.account_id, a.login, "
+            "       SUM(ur.prompt_tokens)::bigint     AS prompt_tokens, "
+            "       SUM(ur.completion_tokens)::bigint AS completion_tokens, "
+            "       SUM(ur.requests)::bigint          AS requests "
+            "FROM usage_rollup ur LEFT JOIN accounts a ON a.id = ur.account_id "
+            "WHERE ($1::date IS NULL OR ur.day >= $1) AND ($2::date IS NULL OR ur.day <= $2) "
+            "GROUP BY ur.account_id, a.login "
+            "ORDER BY (SUM(ur.prompt_tokens) + SUM(ur.completion_tokens)) DESC",
+            date_from, date_to)
+        return [{"account_id": str(r["account_id"]) if r["account_id"] else None,
+                 "login": r["login"],
+                 "prompt_tokens": int(r["prompt_tokens"]),
+                 "completion_tokens": int(r["completion_tokens"]),
+                 "requests": int(r["requests"])} for r in rows]
+
+    async def usage_by_model(self, date_from: dt.date | None,
+                             date_to: dt.date | None) -> list[dict]:
+        rows = await self._pool.fetch(
+            "SELECT model, "
+            "       SUM(prompt_tokens)::bigint     AS prompt_tokens, "
+            "       SUM(completion_tokens)::bigint AS completion_tokens, "
+            "       SUM(requests)::bigint          AS requests "
+            "FROM usage_rollup "
+            "WHERE ($1::date IS NULL OR day >= $1) AND ($2::date IS NULL OR day <= $2) "
+            "GROUP BY model "
+            "ORDER BY (SUM(prompt_tokens) + SUM(completion_tokens)) DESC",
+            date_from, date_to)
+        return [{"model": r["model"], "prompt_tokens": int(r["prompt_tokens"]),
+                 "completion_tokens": int(r["completion_tokens"]),
+                 "requests": int(r["requests"])} for r in rows]
