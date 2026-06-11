@@ -25,6 +25,8 @@ class UpstreamResult:
     status: int
     headers: dict
     body: bytes
+    account_id: str | None = None
+    rebound: bool = False
     stream = None  # populated by the streaming path; None for buffered
 
 
@@ -49,6 +51,7 @@ class Forwarder:
             account=account, path=path, method=method,
             headers=headers, body=body, anthropic=anthropic,
         )
+        result.account_id = binding.account_id
         if is_login_expired(result.status, result.body):
             # account login is dead: quarantine + rebind + retry once
             new_binding = await self._binding.rebind_away_from(
@@ -59,4 +62,6 @@ class Forwarder:
                 account=account, path=path, method=method,
                 headers=headers, body=body, anthropic=anthropic,
             )
+            result.account_id = new_binding.account_id
+            result.rebound = True
         return result

@@ -50,8 +50,8 @@
                            │  存活性校验 · Device Flow · 健康隔离    │
                            └──────┬─────────────┬─────────────┬─────┘
                               PostgreSQL       Redis         Kafka
-                          (账号/用户/绑定/  (token/绑定缓存   (prompt 日志/
-                           Key/用量聚合)     /锁/限流)         用量计量/审计)
+                          (账号/用户/绑定/  (Key 短缓存/      (prompt 日志/
+                               Key/用量聚合)     账号锁)          用量计量/审计)
 ```
 
 - **proxy 角色**：处理前端流量，完全无状态（状态在 PG/Redis），可任意水平扩展；
@@ -61,9 +61,9 @@
 
 - **1:1 粘性绑定**：`bindings` 表对 `user_id` 与 `account_id` 双 `UNIQUE`，从存储层杜绝一账号绑定多用户；空闲账号用 `FOR UPDATE SKIP LOCKED` 原子分配。
 - **凭证长期保活**：refresher 定时校验 `gho_` 存活性；失效自动隔离账号等待重登。
-- **自动改路由容错**：账号登录失效（401/403）时隔离该账号，从空闲池重新绑定 healthy 账号并重试本次请求（至多一次）。
+- **自动改路由容错**：账号登录失效（401/403）时隔离该账号，从空闲池重新绑定 healthy 账号并重试本次请求（至多一次，含流式请求）。
 - **协议兼容**：同时兼容 Anthropic Messages（Claude Code）与 OpenAI 风格（Codex/OpenClaw），含 SSE 流式透传。
-- **可观测性**：prompt / 用量 / 审计事件投递 Kafka，指标暴露 Prometheus（`/metrics`）。
+- **可观测性**：prompt 请求、用量、审计事件投递 Kafka；buffered 响应同步记录响应体，流式响应不缓存完整输出；指标暴露 Prometheus（`/metrics`）。
 
 ---
 
@@ -136,7 +136,7 @@ curl localhost:8080/v1/messages -H "x-api-key: ghcp_<key>" \
 
 ```bash
 pip install -e ".[dev]"
-pytest -q          # 67 项单元/接口测试，无需外部依赖
+pytest -q          # 73 项单元/接口测试，无需外部依赖
 ```
 
 ---
@@ -146,7 +146,7 @@ pytest -q          # 67 项单元/接口测试，无需外部依赖
 | 项 | 状态 | 说明 |
 |---|---|---|
 | 可行性（凭证机制） | ✅ | 抓包实测：`gho_` 直接作 Bearer；GPT/Claude/models 均通。 |
-| 单元 + 接口测试 | ✅ | `pytest` 67 项全绿（crypto / 绑定 / 转发改路由 / 用量解析 / 鉴权 / 配置 / 接口）。 |
+| 单元 + 接口测试 | ✅ | `pytest` 73 项全绿（crypto / 绑定 / 转发改路由 / 流式错误处理 / Device Flow / 用量解析 / 鉴权 / 配置 / 接口）。 |
 | 本地全栈集成 | ✅ | docker-compose 全栈，真实 `gho_` 跑通 GPT + Claude（OpenAI 与 Anthropic 两种协议）+ 流式 + 用量入库 + Kafka 事件。 |
 | Azure 云端部署 | ✅ | `rg-dev2`（japaneast）VM 全栈；从 `vnet-dev-jpe` 经 VNet Peering 内网调用 GPT/Claude 通过。 |
 

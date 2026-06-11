@@ -38,7 +38,7 @@ GitHub 官方文档明确支持将 Copilot 作为 OpenClaw 等第三方工具的
 
 ### 2.1 凭证模型（设计的技术基石 —— 实测修正）
 
-> ⚠️ **重要修正**：早期设想 GHC 用「`gho_` 长效 → 短效 copilot token」两段式换取。抓包实测表明：**当前独立 Copilot CLI 直接用 `gho_` token 作为模型 API 的 Bearer**，并不调用 `copilot_internal/v2/token` 换取短效 token（该接口对 CLI 颁发的 `gho_` token 返回 404，因其 scope 为 `gist, read:org, read:user, repo`，不含 `copilot`）。早期 VS Code 风格 token 可能仍走换取流程，故实现同时兼容两条路径，但**直接 Bearer 是当前可用路径**。
+> ⚠️ **重要修正**：早期设想 GHC 用「`gho_` 长效 → 短效 copilot token」两段式换取。抓包实测表明：**当前独立 Copilot CLI 直接用 `gho_` token 作为模型 API 的 Bearer**，并不调用 `copilot_internal/v2/token` 换取短效 token（该接口对 CLI 颁发的 `gho_` token 返回 404，因其 scope 为 `gist, read:org, read:user, repo`，不含 `copilot`）。当前实现采用**直接 Bearer**路径。
 
 | Token | 来源 | 形态 | 生命周期 | 用途 |
 |---|---|---|---|---|
@@ -65,7 +65,7 @@ GHC CLI 把 OAuth token 落盘在 `~/.copilot/config.json`（JSONC 格式，含 
 }
 ```
 
-> 提取方式：解析该 JSONC（去除注释后按 JSON 解析），读取 `copilotTokens` 下的值即为 `gho_` token。GHC Proxy **不依赖**继续使用本地 CLI——拿到 `gho_` token 后，后续全部走 HTTP，由代理自己完成 token 交换与请求。
+> 提取方式：解析该 JSONC（去除注释后按 JSON 解析），读取 `copilotTokens` 下的值即为 `gho_` token。GHC Proxy **不依赖**继续使用本地 CLI——拿到 `gho_` token 后，后续全部走 HTTP，由代理自己直接携带 Bearer 调用模型 API。
 
 ### 2.3 Device Flow 登录（操作人员授权）
 
@@ -109,7 +109,7 @@ anthropic-version: 2023-06-01            # 仅 /v1/messages 需要
 依据 GitHub 官方 *Copilot allowlist reference*（HTTPS / 443）：
 
 - **认证 / 设备流**：`https://github.com/login/*`
-- **用户与凭证交换**：`https://api.github.com/user`、`https://api.github.com/copilot_internal/*`
+- **用户信息 / 兼容性探测（可选）**：`https://api.github.com/user`；当前实现不调用 `copilot_internal/*`
 - **模型 API**：`https://*.githubcopilot.com/*`（含 `*.individual.` / `*.business.` / `*.enterprise.githubcopilot.com`）、`https://copilot-proxy.githubusercontent.com`、`https://origin-tracker.githubusercontent.com`
 - **遥测（可选）**：`https://copilot-telemetry.githubusercontent.com/telemetry`、`https://collector.github.com/*`
 - **实验配置（可选）**：`https://default.exp-tas.com`
@@ -126,33 +126,32 @@ anthropic-version: 2023-06-01            # 仅 /v1/messages 需要
                           ┌──────────────────────────────────────────────────────┐
  Claude Code ─┐           │                     GHC Proxy 镜像                     │
  Codex        ┼─ proxy ──▶│  [proxy 角色 · 无状态 · HPA 扩缩]                       │
- OpenClaw     ┘  key      │   Ingress Adapters → Router/Binding → Credential Svc    │──▶ api.github.com
-                          │   (anthropic ⇄ openai)  (1:1 粘性)   (token 交换/缓存)  │   /copilot_internal/v2/token
-                          │                                                        │──▶ api.<plan>.githubcopilot.com
-                          │  [refresher 角色 · 抢锁单例]                            │   /chat/completions /responses /models
-                          │   定时刷新 · Device Flow 引导 · 健康检查/隔离          │
+ OpenClaw     ┘  key      │   Ingress Adapters → Router/Binding → Credential Svc    │──▶ api.<plan>.githubcopilot.com
+                          │   (协议直通/透传)      (1:1 粘性)   (gho_ Bearer)      │   /chat/completions /responses /models
+                          │                                                        │
+                          │  [refresher 角色 · 抢锁单例]                            │
+                          │   存活性校验 · 健康检查/隔离                            │
                           └───────┬───────────────┬────────────────┬──────────────┘
                                   │               │                │
                             PostgreSQL          Redis            Kafka
-                       (accounts/users/     (copilot_token     (prompt 日志,
-                        bindings/creds/      缓存, binding      usage 计量,
-                        usage 聚合)          缓存, device       audit)
-                                             session, 账号锁)
+                       (accounts/users/     (key 缓存,账号锁    (prompt 日志,
+                        bindings/creds/      与健康锁)          usage 计量,
+                        usage 聚合)                             audit)
 ```
 
 - **proxy 角色**：处理前端流量，完全无状态（状态在 PG/Redis），可任意水平扩展；
-- **refresher 角色**：负责「主动刷新 token、Device Flow 登录引导、账号健康检查与隔离」等周期/异步任务，靠 Redis 分布式锁做到**每账号单写者**，避免多副本竞争。
+- **refresher 角色**：负责「主动存活性校验、账号健康检查与隔离」等周期任务，靠 Redis 分布式锁做到**每账号单写者**，避免多副本竞争；Device Flow 由 Admin API 发起并轮询完成。
 
 ### 3.2 模块职责
 
 | 模块 | 职责 | 依赖 |
 |---|---|---|
 | **Ingress Adapters** | 终结前端协议；将 Anthropic Messages 与 OpenAI 风格请求归一化为内部 canonical 请求；流式响应回译。提供 `/v1/messages`（Anthropic）与 `/v1/chat/completions`、`/v1/responses`、`/v1/models`（OpenAI 直通）。 | — |
-| **Auth & Key** | 校验前端 `proxy key`，解析出 `user_id`、配额、限流策略。 | PG/Redis |
+| **Auth & Key** | 校验前端 `proxy key`，解析出 `user_id`；Key 查找结果走 Redis 短缓存。 | PG/Redis |
 | **Router / Binding** | 维护「user ↔ account」1:1 粘性绑定；绑定缺失或账号不健康时分配空闲账号；并发上限（每账号至多 1 个活跃用户）。 | PG/Redis |
-| **Credential Svc** | 用账号 `gho_` token 换/取短效 Copilot token（Redis 缓存，按 `expires_at` 设 TTL）；附加客户端 header；调用模型 API；处理上游 401/限流。 | PG/Redis |
-| **Refresher Worker** | 周期扫描即将到期的 token 并提前刷新；驱动 Device Flow；账号健康探测与隔离/恢复。 | PG/Redis |
-| **Admin API** | 账号导入、发起登录、查看账号/绑定/配额、隔离/解隔离、用量报表。 | PG |
+| **Credential Svc** | 解密账号 `gho_` token，附加客户端 header，以 Bearer 直接调用模型 API；处理上游 401/限流。 | PG/Redis |
+| **Refresher Worker** | 周期扫描到期账号并调用 `/models` 做存活性校验；账号健康探测与隔离。 | PG/Redis |
+| **Admin API** | 账号导入、发起登录、轮询完成 Device Flow、查看账号、签发 Key。 | PG |
 | **Observability** | 把 prompt、用量、审计事件投递 Kafka；指标暴露 Prometheus。 | Kafka |
 
 ---
@@ -162,46 +161,43 @@ anthropic-version: 2023-06-01            # 仅 /v1/messages 需要
 ### 4.1 在线推理请求（命中已绑定且健康的账号）
 
 ```
-Client                Proxy(Ingress→Auth→Router→Cred)         Redis        GHC
+Client                Proxy(Ingress→Auth→Router→Cred)         Redis/PG     GHC
   │  POST /v1/messages (Bearer proxy_key)  │                    │            │
   ├───────────────────────────────────────▶                    │            │
-  │                       校验 key → user_id│                    │            │
-  │                       查 binding(user)  ├──读缓存───────────▶│            │
+  │                       校验 key → user_id│  key 短缓存/PG      │            │
+  │                       查/建 binding     ├──PG 原子分配──────▶│            │
   │                          ◀── account_id ┤◀───────────────────┤            │
-  │                       取 copilot_token  ├──读缓存───────────▶│            │
-  │                                         │  (miss → 见 4.2)   │            │
-  │      Anthropic→canonical→OpenAI 请求    │                    │            │
-  │                                         ├── POST /chat/completions (Bearer copilot_token) ─▶
+  │                       解密 gho_ token    │                    │            │
+  │             协议直通 / SSE 透传          │                    │            │
+  │                                         ├── POST /chat/completions (Bearer gho_) ─▶
   │                                         │            (SSE 流式)            ◀──────────────────
-  │   ◀── OpenAI→Anthropic 流式回译 (SSE) ──┤                    │            │
+  │   ◀── 上游响应 / SSE 透传 ──────────────┤                    │            │
   │                                         ├──▶ Kafka: prompt 日志 / usage    │
 ```
 
-要点：热路径**只读 Redis**（binding + copilot_token 均命中缓存），无同步 DB 写；prompt/usage **异步**投 Kafka，不阻塞响应。
+要点：前端 Key 查找走 Redis 短缓存，1:1 binding 以 PG 为强一致来源；prompt/usage 投 Kafka 被限时保护，不阻塞响应。
 
-### 4.2 Token 缓存未命中 / 即将过期（Credential Svc + Refresher）
+### 4.2 账号存活性校验（Refresher）
 
 ```
-                Credential Svc                  Redis                 GHC(api.github.com)
- cache miss ───────────────────────────────────▶ GET copilot_token:{account}
-                                                  (nil)
-            尝试获取每账号锁 ─────────────────────▶ SET lock:{account} NX EX
-            GET /copilot_internal/v2/token (token <gho_>) ───────────────────────────▶
-            ◀── {token, expires_at, refresh_in, endpoints} ─────────────────────────
-            写缓存 SET copilot_token:{account} EX=(expires_at-now-skew) ─▶
-            记录 refresh_at=now+refresh_in 到 PG ─▶
-            释放锁
+                Refresher                       Redis                 GHC
+ due account ─────────────────────────────────▶ SET lock:account:{id} NX EX
+            用账号 gho_ 构造 Bearer header ───────────────────────────▶ GET /models
+            ◀── 200 / 401 / 403 / 5xx ─────────────────────────────────────────────
+            200: 写 last_seen_at/refresh_at 到 PG
+            401/403 login_required: quarantine account + audit
+            5xx/网络抖动: 保持原状态，等待下次扫描
 ```
 
-Refresher Worker 独立地周期扫描 `refresh_at <= now` 的账号并提前刷新，保证「用户长期不访问也不掉线」。
+Refresher Worker 独立地周期扫描 `refresh_at <= now` 的账号，降低用户流量首次遇到失效凭证的概率。
 
 ### 4.3 账号登录失效 → 自动改路由（核心容错）
 
 ```
-Cred Svc ── /chat/completions ─▶ GHC
+Cred Svc ── /chat/completions 或 SSE ─▶ GHC
         ◀── 401 / token_expired / login_required ──┐
         │                                           │
-        │ 1) 标记 account 为 quarantined（PG）+ 发告警(Kafka)
+        │ 1) 标记 account 为 quarantined（PG）
         │ 2) Router: 解绑 user，从空闲池挑一个 healthy account 重新 1:1 绑定
         │ 3) 用新账号重试本次请求（至多 1 次）
         │ 4) 旧账号进入「待操作人员重新登录」队列；Refresher 持续探测
@@ -214,12 +210,12 @@ Cred Svc ── /chat/completions ─▶ GHC
 ### 4.4 Device Flow 账号上线（操作人员）
 
 ```
-Operator/Admin UI        Admin API / Refresher           GHC
-  │ 发起登录(account)  ──▶ POST /login/device/code ──────▶
+Operator/Admin UI        Admin API                      GHC
+  │ POST /admin/accounts/{login}/login/start ───────────▶ POST /login/device/code
   │                    ◀── user_code, verification_uri ──
   │ ◀── 展示「访问 github.com/login/device 输入 XXXX-XXXX」┤
   │ (真人浏览器完成授权)                                   │
-  │                       轮询 /login/oauth/access_token ─▶
+  │ POST /admin/accounts/{login}/login/poll ─────────────▶ POST /login/oauth/access_token
   │                    ◀── gho_ access_token ─────────────
   │                       加密存 PG(accounts.oauth_token)  │
   │                       account 置为 healthy/idle        │
@@ -258,7 +254,7 @@ usage_rollup(user_id, account_id, day, model, prompt_tokens, completion_tokens,
              requests, PRIMARY KEY(user_id, day, model))
 ```
 
-> Redis 键：`copilot_token:{account_id}`（短效 token，TTL=过期前）、`binding:{user_id}`（绑定缓存）、`lock:account:{account_id}`（刷新/分配互斥）、`ratelimit:{key_id}`（限流计数）。
+> Redis 键：`key:{sha256(proxy_key)}`（Key→user 短缓存）、`lock:account:{account_id}`（存活性校验互斥）。绑定关系以 PostgreSQL 为强一致来源。
 > 加密：`oauth_token_enc` 用应用层 AEAD（如 AES-GCM），数据密钥经 KMS 信封加密；明文 token 绝不入库、不进日志。
 
 ---
@@ -275,8 +271,8 @@ usage_rollup(user_id, account_id, day, model, prompt_tokens, completion_tokens,
 
 ## 7. 可观测性、计量与审计（Kafka）
 
-- **Topics**：`ghcproxy.prompts`（完整请求/响应，供审计与数据挖掘）、`ghcproxy.usage`（每请求 token 计量）、`ghcproxy.audit`（绑定变更、账号隔离、登录事件）。
-- **消费侧**：流式落数仓（用户行为分析）、聚合写回 `usage_rollup`、告警规则（隔离账号数、503 率、刷新失败率）。
+- **Topics**：`ghcproxy.prompts`（请求 prompt；buffered 请求会附带响应体，流式响应不缓存完整输出）、`ghcproxy.usage`（每请求 token 计量，含 user/account/model）、`ghcproxy.audit`（账号隔离、登录事件）。
+- **消费侧**：流式落数仓（用户行为分析）、告警规则（隔离账号数、503 率、刷新失败率）。
 - **隐私**：prompt 留存需符合企业合规；建议对 topic 做加密与访问控制，必要时对敏感字段脱敏。
 - **指标（Prometheus）**：QPS、上游时延、token 命中率、刷新成功率、隔离账号数、空闲账号数、绑定饱和度。
 
@@ -290,7 +286,7 @@ usage_rollup(user_id, account_id, day, model, prompt_tokens, completion_tokens,
 | refresher | 多副本但靠 Redis 锁选主/每账号单写者；避免重复刷新与竞争。 |
 | 状态层 | PG 主从 + 连接池；Redis 哨兵/集群；Kafka 多分区多副本。 |
 | 优雅退出 | proxy 收到 SIGTERM 后 drain 在途流式请求再退出。 |
-| 限流/熔断 | 每 key 限流；对 GHC 上游 5xx/429 退避重试 + 熔断。 |
+| 限流/熔断 | 当前透传 GHC 上游 429/5xx；可在后续版本接入每 key 限流与熔断。 |
 | 密钥安全 | `gho_` 信封加密；Secret 经 K8s Secret/External Secrets 注入。 |
 
 ---
@@ -333,7 +329,7 @@ src/ghcproxy/
 ├── observability/
 │   ├── sink.py                 # Kafka 生产者（prompt/usage/audit）+ Null 兜底
 │   └── metrics.py              # Prometheus 指标
-├── admin/api.py                # 操作人员 API：导入账号 / 发起登录 / 签发 Key
+├── admin/api.py                # 操作人员 API：导入账号 / 发起登录 / 轮询完成 / 签发 Key
 └── db/{repo.py,schema.sql}     # asyncpg 仓储（FOR UPDATE SKIP LOCKED）+ DDL
 
 deploy/
@@ -341,5 +337,5 @@ deploy/
 └── k8s/                        # namespace / config+secret / proxy(Deploy+Svc+HPA) / refresher
 ```
 
-> 该实现已通过 67 项单元/接口测试，并在本地与 **Azure（rg-dev2，VNet 内）docker-compose 全栈**中用真实 `gho_` 凭证跑通 GPT 与 Claude 调用（OpenAI `/chat/completions` 与 Anthropic `/v1/messages` 均验证）。
+> 该实现已通过 73 项单元/接口测试，并在本地与 **Azure（rg-dev2，VNet 内）docker-compose 全栈**中用真实 `gho_` 凭证跑通 GPT 与 Claude 调用（OpenAI `/chat/completions` 与 Anthropic `/v1/messages` 均验证）。
 > `examples/` 保留早期 TypeScript 说明性骨架，仅供对照，非运行产物。

@@ -101,6 +101,71 @@ class PgRepo:
             "ORDER BY refresh_at NULLS FIRST LIMIT $2", now, limit)
         return [self._row_to_account(r) for r in rows]
 
+    # -- device flow -------------------------------------------------------
+    async def create_device_session(
+        self, login: str, device_code: str, user_code: str, verification_uri: str,
+        interval_s: int, expires_at: dt.datetime, *,
+        plan: str = "enterprise",
+        api_base: str = "https://api.enterprise.githubcopilot.com",
+    ) -> tuple[str, str]:
+        enc = self._cipher.encrypt(device_code)
+        async with self._pool.acquire() as con:
+            async with con.transaction():
+                account = await con.fetchrow(
+                    "INSERT INTO accounts (login, plan, api_base, status) "
+                    "VALUES ($1,$2,$3,'logging_in') "
+                    "ON CONFLICT (host, login) DO UPDATE SET "
+                    "  plan = EXCLUDED.plan, api_base = EXCLUDED.api_base, "
+                    "  status = CASE WHEN accounts.status IN ('idle','quarantined','logging_in') "
+                    "                THEN 'logging_in' ELSE accounts.status END, "
+                    "  updated_at = now() "
+                    "RETURNING id",
+                    login, plan, api_base)
+                session = await con.fetchrow(
+                    "INSERT INTO device_sessions "
+                    "(account_id, device_code_enc, user_code, verification_uri, interval_s, expires_at) "
+                    "VALUES ($1,$2,$3,$4,$5,$6) RETURNING id",
+                    account["id"], enc, user_code, verification_uri, interval_s, expires_at)
+                return str(account["id"]), str(session["id"])
+
+    async def get_pending_device_session(self, login: str) -> dict | None:
+        row = await self._pool.fetchrow(
+            "SELECT ds.id, ds.account_id, ds.device_code_enc, ds.user_code, "
+            "       ds.verification_uri, ds.interval_s, ds.expires_at "
+            "FROM device_sessions ds JOIN accounts a ON a.id = ds.account_id "
+            "WHERE a.login=$1 AND ds.status='pending' AND ds.expires_at > now() "
+            "ORDER BY ds.created_at DESC LIMIT 1",
+            login)
+        if not row:
+            return None
+        out = dict(row)
+        out["id"] = str(out["id"])
+        out["account_id"] = str(out["account_id"])
+        out["device_code"] = self._cipher.decrypt(bytes(out.pop("device_code_enc")))
+        return out
+
+    async def mark_device_session(self, session_id: str, status: str) -> None:
+        await self._pool.execute(
+            "UPDATE device_sessions SET status=$2 WHERE id=$1",
+            session_id, status)
+
+    async def complete_device_session(self, session_id: str, oauth_token: str) -> str:
+        enc = self._cipher.encrypt(oauth_token)
+        async with self._pool.acquire() as con:
+            async with con.transaction():
+                row = await con.fetchrow(
+                    "UPDATE device_sessions SET status='authorized' "
+                    "WHERE id=$1 RETURNING account_id",
+                    session_id)
+                await con.execute(
+                    "UPDATE accounts SET oauth_token_enc=$2, "
+                    "status = CASE WHEN EXISTS ("
+                    "  SELECT 1 FROM bindings WHERE account_id=$1 AND status='active'"
+                    ") THEN 'bound' ELSE 'idle' END, "
+                    "last_error=NULL, updated_at=now() WHERE id=$1",
+                    row["account_id"], enc)
+                return str(row["account_id"])
+
     # -- bindings ---------------------------------------------------------
     async def get_binding(self, user_id: str) -> str | None:
         row = await self._pool.fetchrow(

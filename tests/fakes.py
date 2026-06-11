@@ -26,6 +26,7 @@ class FakeRepo:
     def __init__(self) -> None:
         self.accounts: dict[str, AccountRow] = {}
         self.bindings: dict[str, str] = {}  # user_id -> account_id
+        self.device_sessions: dict[str, dict] = {}
 
     # -- test helpers -----------------------------------------------------
     def add_account(self, account_id: str, status: str = "idle", **kw) -> None:
@@ -64,3 +65,36 @@ class FakeRepo:
         acc = self.accounts.get(account_id)
         if acc:
             acc.last_error = None
+
+    async def create_device_session(
+        self, login, device_code, user_code, verification_uri, interval_s, expires_at,
+        *, plan="enterprise", api_base="https://api.enterprise.githubcopilot.com",
+    ):
+        account_id = f"acc-{login}"
+        self.accounts[account_id] = AccountRow(
+            id=account_id, login=login, oauth_token="", api_base=api_base,
+            plan=plan, status="logging_in")
+        session_id = f"sess-{len(self.device_sessions) + 1}"
+        self.device_sessions[session_id] = {
+            "id": session_id, "account_id": account_id, "login": login,
+            "device_code": device_code, "user_code": user_code,
+            "verification_uri": verification_uri, "interval_s": interval_s,
+            "expires_at": expires_at, "status": "pending"}
+        return account_id, session_id
+
+    async def get_pending_device_session(self, login):
+        for session in reversed(list(self.device_sessions.values())):
+            if session["login"] == login and session["status"] == "pending":
+                return dict(session)
+        return None
+
+    async def mark_device_session(self, session_id, status):
+        self.device_sessions[session_id]["status"] = status
+
+    async def complete_device_session(self, session_id, oauth_token):
+        session = self.device_sessions[session_id]
+        session["status"] = "authorized"
+        account = self.accounts[session["account_id"]]
+        account.oauth_token = oauth_token
+        account.status = "idle"
+        return account.id

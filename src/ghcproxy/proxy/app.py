@@ -46,6 +46,7 @@ def create_app(ctx) -> FastAPI:
 
     @app.get("/metrics")
     async def metrics_endpoint():
+        await _refresh_account_gauges()
         return PlainTextResponse(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     # ---- auth helper ----------------------------------------------------
@@ -104,7 +105,10 @@ def create_app(ctx) -> FastAPI:
                 status_code=503, headers={"Retry-After": "30"})
         metrics.UPSTREAM_LATENCY.labels(protocol).observe(time.perf_counter() - started)
         metrics.REQUESTS.labels(protocol, metrics.status_class(result.status)).inc()
-        await _emit_usage(user_id, usage_from_json(_safe_json(result.body)), body)
+        if result.rebound:
+            metrics.REBINDS.inc()
+        await _emit_usage(user_id, result.account_id,
+                          usage_from_json(_safe_json(result.body)), body, result.body)
         return Response(content=result.body, status_code=result.status,
                         media_type=result.headers.get("content-type", "application/json"))
 
@@ -131,40 +135,99 @@ def create_app(ctx) -> FastAPI:
                 {"error": {"message": "no backend account available", "type": "capacity"}},
                 status_code=503, headers={"Retry-After": "30"})
         account = await ctx.repo.get_account(binding.account_id)
+        cm, resp = await _open_stream(account, request, upstream_path, body, anthropic)
+        account_id = binding.account_id
+        rebound = False
+
+        auth_error_body = await _read_auth_error_body(resp, cm)
+        if auth_error_body is not None:
+            if is_login_expired(resp.status_code, auth_error_body):
+                try:
+                    new_binding = await ctx.binding.rebind_away_from(binding.account_id, user_id)
+                except NoAccountAvailable:
+                    metrics.NO_ACCOUNT.inc()
+                    return JSONResponse(
+                        {"error": {"message": "no backend account available", "type": "capacity"}},
+                        status_code=503, headers={"Retry-After": "30"})
+                account = await ctx.repo.get_account(new_binding.account_id)
+                cm, resp = await _open_stream(account, request, upstream_path, body, anthropic)
+                account_id = new_binding.account_id
+                rebound = True
+            else:
+                metrics.REQUESTS.labels(protocol, metrics.status_class(resp.status_code)).inc()
+                return Response(content=auth_error_body, status_code=resp.status_code,
+                                media_type=resp.headers.get("content-type", "application/json"))
+
+        metrics.REQUESTS.labels(protocol, metrics.status_class(resp.status_code)).inc()
+        if rebound:
+            metrics.REBINDS.inc()
+        media_type = resp.headers.get("content-type", "text/event-stream")
 
         async def gen():
             acc = UsageAccumulator()
-            async with ctx.upstream.stream(
-                account=account, path=upstream_path, method="POST",
-                headers=dict(request.headers), body=body, anthropic=anthropic) as resp:
-                metrics.REQUESTS.labels(protocol, metrics.status_class(resp.status_code)).inc()
+            try:
                 async for chunk in resp.aiter_bytes():
                     for line in chunk.split(b"\n"):
                         acc.observe_sse(line)
                     yield chunk
-            await _emit_usage(user_id, acc.result(), body)
+                await _emit_usage(user_id, account_id, acc.result(), body)
+            finally:
+                await cm.__aexit__(None, None, None)
 
-        return StreamingResponse(gen(), media_type="text/event-stream")
+        return StreamingResponse(gen(), media_type=media_type,
+                                 status_code=resp.status_code)
 
-    async def _emit_usage(user_id, usage, request_body: bytes):
+    async def _open_stream(account, request, upstream_path, body, anthropic):
+        cm = ctx.upstream.stream(
+            account=account, path=upstream_path, method="POST",
+            headers=dict(request.headers), body=body, anthropic=anthropic)
+        resp = await cm.__aenter__()
+        return cm, resp
+
+    async def _read_auth_error_body(resp, cm) -> bytes | None:
+        if resp.status_code not in (401, 403):
+            return None
+        body = await resp.aread()
+        await cm.__aexit__(None, None, None)
+        return body
+
+    async def _emit_usage(user_id, account_id, usage, request_body: bytes,
+                          response_body: bytes | None = None):
         # Observability must never break or stall the response: bound the whole
         # block by a short timeout and swallow any error (e.g. a wedged broker).
         async def _do():
             await ctx.sink.usage({
-                "user_id": user_id, "model": usage.model,
+                "user_id": user_id, "account_id": account_id, "model": usage.model,
                 "prompt_tokens": usage.prompt_tokens,
                 "completion_tokens": usage.completion_tokens,
                 "ts": time.time()})
-            await ctx.sink.prompt({
-                "user_id": user_id, "model": usage.model,
-                "request_bytes": len(request_body), "ts": time.time()})
+            prompt_event = {
+                "user_id": user_id, "account_id": account_id, "model": usage.model,
+                "request_bytes": len(request_body), "request": _json_or_text(request_body),
+                "ts": time.time()}
+            if response_body is not None:
+                prompt_event["response_bytes"] = len(response_body)
+                prompt_event["response"] = _json_or_text(response_body)
+            await ctx.sink.prompt(prompt_event)
             if usage.model:
-                await ctx.repo.bump_usage(user_id, None, usage.model,
+                await ctx.repo.bump_usage(user_id, account_id, usage.model,
                                           usage.prompt_tokens, usage.completion_tokens)
         try:
             await asyncio.wait_for(_do(), timeout=5.0)
         except Exception:
             pass
+
+    async def _refresh_account_gauges():
+        if not hasattr(ctx.repo, "list_accounts"):
+            return
+        try:
+            accounts = await ctx.repo.list_accounts()
+        except Exception:
+            return
+        metrics.QUARANTINED_ACCOUNTS.set(
+            sum(1 for a in accounts if a.get("status") == "quarantined"))
+        metrics.IDLE_ACCOUNTS.set(
+            sum(1 for a in accounts if a.get("status") == "idle"))
 
     # mount admin
     from ghcproxy.admin.api import build_admin_router
@@ -181,6 +244,14 @@ def _safe_json(body: bytes) -> dict:
         return obj if isinstance(obj, dict) else {}
     except Exception:
         return {}
+
+
+def _json_or_text(body: bytes):
+    import json
+    try:
+        return json.loads(body)
+    except Exception:
+        return body.decode("utf-8", "replace")
 
 
 def _wants_stream(body: bytes) -> bool:

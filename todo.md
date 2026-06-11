@@ -45,10 +45,10 @@
 
 ### 完成项
 1. **完整 Python 实现**（`src/ghcproxy/`，FastAPI + httpx + asyncpg + redis + aiokafka）：
-   鉴权 → 1:1 粘性绑定 → 转发（含失效自动改路由重试）→ 用量/prompt 投 Kafka；
-   refresher 存活性校验单写者；admin API（导入账号 / Device Flow / 签发 Key）；Prometheus 指标。
-2. **测试**：`pytest` 67 项单元 + 接口测试全绿（TDD 编写：crypto / keys / config / 绑定 / 转发改路由 /
-   用量解析 / 鉴权 / device flow / refresher / 接口 / 打包）。
+   鉴权 → 1:1 粘性绑定 → 转发（含 buffered/streaming 失效自动改路由重试）→ 用量/prompt 投 Kafka；
+   refresher 存活性校验单写者；admin API（导入账号 / Device Flow start+poll / 签发 Key）；Prometheus 指标。
+2. **测试**：`pytest` 73 项单元 + 接口测试全绿（TDD 编写：crypto / keys / config / 绑定 / 转发改路由 /
+   流式错误处理 / 用量解析 / 鉴权 / device flow / refresher / 接口 / 打包）。
 3. **本地全栈集成**：docker-compose（PG+Redis+Kafka+proxy+refresher），真实 `gho_` 跑通
    GPT（`/chat/completions`）、Claude（`/v1/messages` 与 `/chat/completions`）、流式 SSE、
    用量入 Postgres、事件入 Kafka。

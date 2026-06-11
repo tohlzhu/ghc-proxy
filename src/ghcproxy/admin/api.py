@@ -7,10 +7,18 @@ SSO, or an admin token) — wired via the ``admin_token`` config and the
 """
 from __future__ import annotations
 
+import datetime as dt
+
 from fastapi import APIRouter, Header, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from ghcproxy.common.keys import generate_api_key, hash_api_key
+from ghcproxy.credential.device_flow import (
+    AuthorizationPending,
+    DeviceFlowError,
+    SlowDown,
+)
 
 
 class ImportAccountReq(BaseModel):
@@ -72,9 +80,45 @@ def build_admin_router(ctx) -> APIRouter:
         if ctx.device_flow is None:
             raise HTTPException(status_code=501, detail="device flow not configured")
         dc = await ctx.device_flow.request_device_code()
+        expires_at = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=dc.expires_in)
+        account_id, session_id = await ctx.repo.create_device_session(
+            login, dc.device_code, dc.user_code, dc.verification_uri,
+            dc.interval, expires_at)
         ctx.pending_logins[login] = dc.device_code
-        return {"login": login, "user_code": dc.user_code,
+        return {"login": login, "account_id": account_id, "session_id": session_id,
+                "user_code": dc.user_code,
                 "verification_uri": dc.verification_uri,
                 "interval": dc.interval, "expires_in": dc.expires_in}
+
+    @router.post("/accounts/{login}/login/poll")
+    async def poll_login(login: str,
+                         x_admin_token: str | None = Header(default=None)):
+        """Poll one device-flow step and store the token once authorized."""
+        require_admin(x_admin_token)
+        if ctx.device_flow is None:
+            raise HTTPException(status_code=501, detail="device flow not configured")
+        session = await ctx.repo.get_pending_device_session(login)
+        if session is None:
+            raise HTTPException(status_code=404, detail="no pending device session")
+        try:
+            token = await ctx.device_flow.poll_once(session["device_code"])
+        except SlowDown:
+            return JSONResponse(
+                {"login": login, "status": "pending", "reason": "slow_down",
+                 "interval": session["interval_s"] + 5},
+                status_code=202)
+        except AuthorizationPending:
+            return JSONResponse(
+                {"login": login, "status": "pending",
+                 "interval": session["interval_s"]},
+                status_code=202)
+        except DeviceFlowError as exc:
+            await ctx.repo.mark_device_session(session["id"], "denied")
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        account_id = await ctx.repo.complete_device_session(session["id"], token)
+        ctx.pending_logins.pop(login, None)
+        await ctx.sink.audit({"event": "login_authorized", "account": account_id,
+                              "login": login})
+        return {"login": login, "account_id": account_id, "status": "idle"}
 
     return router
