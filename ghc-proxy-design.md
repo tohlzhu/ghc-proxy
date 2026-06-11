@@ -329,13 +329,83 @@ src/ghcproxy/
 ├── observability/
 │   ├── sink.py                 # Kafka 生产者（prompt/usage/audit）+ Null 兜底
 │   └── metrics.py              # Prometheus 指标
-├── admin/api.py                # 操作人员 API：导入账号 / 发起登录 / 轮询完成 / 签发 Key
+├── admin/api.py                # 操作人员 API：账号导入/登录/轮询、用量聚合、用户与 Key、账号状态、绑定
 └── db/{repo.py,schema.sql}     # asyncpg 仓储（FOR UPDATE SKIP LOCKED）+ DDL
 
+frontend/                       # 运维管理面板（React + Vite + TS + Recharts）SPA
+├── Dockerfile                  # 构建 SPA → nginx 托管（独立镜像）
+├── nginx.conf                  # SPA history fallback + /admin 反向代理（请求时 DNS 解析）
+└── src/{api.ts,pages/*}        # api 封装 + Login/Usage/Bindings/Users/Accounts 页面
+
 deploy/
-├── docker/docker-compose.yaml  # 全栈：PG + Redis + Kafka + proxy + refresher
-└── k8s/                        # namespace / config+secret / proxy(Deploy+Svc+HPA) / refresher
+├── docker/docker-compose.yaml  # 全栈：PG + Redis + Kafka + proxy + refresher + console
+└── k8s/                        # namespace / config+secret / proxy(Deploy+Svc+HPA) / refresher / console
 ```
 
-> 该实现已通过 73 项单元/接口测试，并在本地与 **Azure（rg-dev2，VNet 内）docker-compose 全栈**中用真实 `gho_` 凭证跑通 GPT 与 Claude 调用（OpenAI `/chat/completions` 与 Anthropic `/v1/messages` 均验证）。
+> 该实现已通过 98 项单元/接口测试（含 25 项面板 admin 端点测试），并在本地与 **Azure（rg-dev2，VNet 内）docker-compose 全栈**中用真实 `gho_` 凭证跑通 GPT 与 Claude 调用（OpenAI `/chat/completions` 与 Anthropic `/v1/messages` 均验证）。
 > `examples/` 保留早期 TypeScript 说明性骨架，仅供对照，非运行产物。
+
+---
+
+## 11. 运维管理面板（Admin Console）
+
+面向**运维操作人员**的独立单页应用，与后端**前后端分离、独立构建部署**。形态为 **独立 SPA + JSON API**：
+React + Vite + TypeScript（图表用 Recharts）静态产物由 nginx 托管，nginx 将 `/admin/*` 反向代理到 proxy
+的 admin API，使浏览器同源访问、无需 CORS；静态 `X-Admin-Token` 头直接透传到后端。
+
+### 11.1 鉴权
+
+沿用现有**静态 admin token** 机制，**不新增操作员账号体系**：操作人员在面板登录时输入
+`GHCPROXY_ADMIN_TOKEN`，前端把它存入 `sessionStorage`，每次请求带 `X-Admin-Token` 头；后端所有端点继续
+走 `require_admin`。返回 403 时前端清除 token 并退回登录页。
+
+### 11.2 能力与端点
+
+复用既有数据模型（`schema.sql` 无需变更），在 `admin/api.py` 基础上**补齐缺失的 JSON 端点**，并在
+`repo.py` 增补只读查询与状态变更方法（`FakeRepo` 同步镜像契约以供测试）。
+
+| 能力 | 端点 | 说明 |
+|---|---|---|
+| **用量·时间趋势** | `GET /admin/usage/timeseries?from&to` | 按日聚合 prompt/completion/requests，升序。 |
+| **用量·按用户** | `GET /admin/usage/by-user?from&to` | join `users` 标注 external_id/display_name，按 token 降序排行。 |
+| **用量·按账号** | `GET /admin/usage/by-account?from&to` | join `accounts` 标注 login，账号流量分布。 |
+| **用量·按模型** | `GET /admin/usage/by-model?from&to` | 各模型 token 占比。 |
+| **用户与 Key 列表** | `GET /admin/users` | 用户及名下 Key **元数据**（name/scopes/status/rate_limit/created/last_used）；**绝不回显明文或哈希**。 |
+| **创建用户** | `POST /admin/users` | 建用户并签发默认 Key（明文仅此一次返回）。 |
+| **停用/启用用户** | `PATCH /admin/users/{user_id}` | `{status: active|disabled}`，非法值 400。 |
+| **新增 Key** | `POST /admin/users/{user_id}/keys` | `{name,scopes?,rate_limit?}`，明文仅此一次返回。 |
+| **轮换 Key** | `POST /admin/keys/{key_id}/rotate` | 吊销旧 Key + 以同元数据签发新 Key，明文仅此一次返回。 |
+| **吊销 Key** | `POST /admin/keys/{key_id}/revoke` | 置 `status=revoked`。 |
+| **账号池列表** | `GET /admin/accounts` | 扩展列：login/plan/api_base/status/last_error/last_seen_at/refresh_at/updated_at。 |
+| **变更账号状态** | `PATCH /admin/accounts/{account_id}/status` | 操作人员可置 `idle|disabled|quarantined`（如解除隔离回 idle、停用账号）；系统态 `logging_in/bound` 不可手动设置，非法值 400。 |
+| **绑定列表** | `GET /admin/bindings` | join `bindings`+`users`+`accounts`：user/account/status/bound_at/last_active_at。 |
+| **手动解绑** | `POST /admin/bindings/{user_id}/release` | 复用 `release_binding`，bound 账号回 idle，发 `binding_released` 审计。 |
+| **Device Flow（既有）** | `POST /admin/accounts/{login}/login/{start,poll}` | 失效账号重登：展示 `user_code`/`verification_uri` 供真人浏览器授权。 |
+
+> 用量查询的 `from`/`to` 为可选日期参数，缺省取最近 30 天；非法日期返回 400。
+
+### 11.3 页面与数据流
+
+```
+Operator browser ──(X-Admin-Token, 同源)──▶ [console nginx] ──/admin/*──▶ [proxy] admin API ──▶ PostgreSQL
+   Login / Usage / Bindings / Users&Keys / Accounts        反向代理（请求时 DNS）
+```
+
+- **Usage**：四维可视化——日趋势折线、模型占比饼图、账号流量柱状、用户排行表格，附时间窗选择。
+- **Bindings**：1:1 绑定表 + 手动解绑。
+- **Users & Keys**：用户卡片 + Key 元数据表；创建/新增/轮换/吊销；明文 Key 用 copy-once 弹窗仅展示一次。
+- **Accounts**：账号表 + 状态操作（解除隔离/停用/启用）+ Device Flow 弹窗（展示 user_code / verification_uri、轮询）。
+
+### 11.4 非目标（与既有项目范围一致）
+
+- ❌ 不读取/检索 prompt 日志（未留存于数据库，仅在 Kafka）。
+- ❌ 不实现操作员账号 / SSO / 会话登录（沿用静态 admin token）。
+- ❌ 不消费 Kafka、不做数据分析。
+
+### 11.5 部署形态
+
+- `frontend/Dockerfile`：多阶段（`node` 构建 → `nginx:alpine` 托管 `dist/`）。
+- `frontend/nginx.conf`：`try_files … /index.html` 历史回退；`/admin/` 反向代理到 `${PROXY_UPSTREAM}`
+  （默认 `proxy:8080`）。用 `resolver` + 变量 `proxy_pass` 做**请求时 DNS 解析**，使面板在 proxy 尚不可解析时也能正常启动。
+- `deploy/docker/docker-compose.yaml`：新增 `console` 服务（`8081:80`）。
+- `deploy/k8s/40-console.yaml`：console 的 Deployment + Service（`PROXY_UPSTREAM=ghc-proxy:80`），经 Ingress/LoadBalancer 对运维暴露。

@@ -65,6 +65,19 @@ services:
       GHCPROXY_CRYPTO__DATA_KEY_B64: ${DATA_KEY_B64:-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}
     ports: ["8080:8080"]
 
+  # Operator Admin Console: static React SPA served by nginx, reverse-proxying
+  # /admin/* to the proxy service. Browse http://localhost:8081 and sign in
+  # with GHCPROXY_ADMIN_TOKEN.
+  console:
+    build:
+      context: ../../frontend
+      dockerfile: Dockerfile
+    depends_on:
+      proxy: { condition: service_started }
+    environment:
+      PROXY_UPSTREAM: proxy:8080
+    ports: ["8081:80"]
+
   refresher:
     build:
       context: ../..

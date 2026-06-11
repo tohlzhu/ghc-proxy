@@ -1,0 +1,51 @@
+# console role: operator Admin Console — static React SPA served by nginx,
+# reverse-proxying /admin/* to the ghc-proxy Service. Independent image and
+# deployment from the proxy backend (front/back separated).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ghc-proxy-console
+  namespace: ghc-proxy
+  labels: { app: ghc-proxy, role: console }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: ghc-proxy, role: console }
+  template:
+    metadata:
+      labels: { app: ghc-proxy, role: console }
+    spec:
+      containers:
+        - name: console
+          image: REGISTRY/ghc-proxy-console:TAG   # set by CI
+          env:
+            # in-cluster the proxy is reachable via its Service (port 80)
+            - name: PROXY_UPSTREAM
+              value: "ghc-proxy:80"
+          ports: [{ containerPort: 80 }]
+          readinessProbe:
+            httpGet: { path: /, port: 80 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /, port: 80 }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests: { cpu: "50m", memory: "64Mi" }
+            limits:   { cpu: "250m", memory: "128Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ghc-proxy-console
+  namespace: ghc-proxy
+spec:
+  selector: { app: ghc-proxy, role: console }
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+# Expose the console externally via your Ingress controller (TLS-terminated)
+# or change the Service type to LoadBalancer. Restrict access to operators —
+# the console authenticates with the static GHCPROXY_ADMIN_TOKEN.
