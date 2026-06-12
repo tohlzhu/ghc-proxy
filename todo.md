@@ -1,6 +1,6 @@
 # TODO
 
-新增需求：为 GHC 代理服务开发一个**运维管理面板（Admin Console）**。
+新增需求：核实、修复 GHC 验证机制和请求头格式。
 
 ## 需求背景
 
@@ -18,63 +18,23 @@
 
 ## 任务需求
 
-开发一个面向**运维操作人员**的 Web 管理面板，能力如下：
+本项目中将 github copilot 请求服务器的过程理解为基于 gho_ 的单一验证机制，并且声称测试过了属实。但是我从其他信息源看到的反馈是：
 
-### 1. 账号绑定可视化
-- 查看「前端用户 ↔ 后端 GHC 账号」的 1:1 粘性绑定关系（来自 `bindings` 表）：绑定状态
-  （active/released）、绑定时间、最近活跃时间。
-- 支持手动解绑（释放绑定，使账号回到 idle 可被重新分配）。
+- GHC 认证方式是两级的：第一层登录的 token A （gho/ghu 的key）是长效的，至少能用 1 年；第二层验证是用 gho 向github copilot 获取临时 token B 用于访问 GHC API，这个 token B 的过期时间 30 分钟，需要定期刷新；
+- 最终用 token B 访问 GHC API 的 http 请求 header 也要构造，多参考 OpenClaw/OpenCode/litellm 的实现，如果实现的不好会影响 Cache，也可能被后台抓为异常；（比如 cc switch 就没构造好这个，造成 cache 命中低等问题）；
 
-### 2. token 用量可视化（读取 `usage_rollup`，不读 prompt 明细）
-按以下**全部维度**展示用量（prompt_tokens / completion_tokens / requests）：
-- **按时间趋势**：每日/区间的 token 与请求数趋势图。
-- **按前端用户**：各用户的 token 消耗排行与明细。
-- **按后端账号**：各 GHC 后端账号承载的流量分布。
-- **按模型**：各模型（GPT / Claude 等）的 token 占比。
+请整体分析 ghc-proxy 项目代码，搜索网络，调研核实后回答：
 
-### 3. 前端用户与 Key 全生命周期管理
-- 列出所有前端用户（`users`）及其名下 Key（`api_keys`，仅展示元数据，**不展示明文/哈希**）：
-  Key 名称、scopes、状态、限速、创建时间、最近使用时间。
-- 创建用户并签发默认 Key（明文 Key 仅在创建时返回一次）。
-- 为既有用户新增 / 轮换 / 吊销 Key。
-- 停用 / 启用前端用户。
+1. GHC 认证是只需要维护 gho_ 还是需要按长短期两个 token 实现；
+2. 项目中请求 GHC 的请求头是否如 OpenCode/litellm 等实现做了正确处理；
 
-### 4. 后端 GHC 账号状态管理
-- 查看账号池（`accounts`）：login、plan、api_base、status
-  （logging_in/idle/bound/quarantined/disabled）、last_error、last_seen_at、下次刷新时间。
-- 变更账号状态（如 disable / 解除 quarantine 回到 idle）。
-- 导入新账号（既有能力）。
-- 对登录失效的账号触发 Device Flow 重新登录，并展示返回的 `user_code` / `verification_uri`
-  供操作人员在浏览器完成真人授权（start + poll，既有能力）。
+注意多方面获取信息，交叉验证结论。**并且确保先有调研结论，和我确认后再修复实现！！**
 
-### 5. 鉴权
-- 面板沿用现有**静态 admin token** 机制：操作人员在面板登录时输入 `GHCPROXY_ADMIN_TOKEN`，
-  前端持该 token 调用 admin API（`X-Admin-Token` 头）。不新增操作员账号体系。
-
-## 技术形态
-
-- **独立 SPA + JSON API**：前端为单页应用（现代框架），通过扩展后的 admin JSON API 与后端交互；
-  前后端分离、独立构建与部署。
-- 后端在现有 `src/ghcproxy/admin/api.py` 基础上**补齐当前缺失的 JSON 端点**，至少包括：
-  - 用量查询：按 用户 / 账号 / 模型 / 时间区间 聚合查询 `usage_rollup`。
-  - 用户与 Key：列出用户、列出/新增/轮换/吊销 Key、停用/启用用户。
-  - 账号：变更账号状态、查看绑定关系、手动解绑。
-  - （账号导入、Device Flow start/poll 已存在，复用即可。）
-- 所有新增端点继续走 `require_admin`（静态 admin token）鉴权。
-
-## 范围与非目标
-
-- ❌ 不读取/检索 prompt 日志（未留存于数据库，仅在 Kafka）。
-- ❌ 不实现操作员账号/SSO/会话登录（沿用静态 admin token）。
-- ❌ 不消费 Kafka、不做数据分析（与既有项目范围一致）。
-- ✅ 仅面向运维操作人员，非面向前端终端用户。
 
 ## 交付条件
 
-1. 后端新增 admin 端点实现完整并有测试覆盖（沿用既有 TDD 风格，`tests/` 下补充用例）。
-2. SPA 实现上述四类管理能力，能通过 admin token 调通后端，本地可运行。
-3. 文档同步更新：README、设计文档（`ghc-proxy-design.md`）补充管理面板章节，部署说明
-   （docker/k8s）补充面板的构建与托管方式。
+1. 如果有变更，要保证前端、后端代码互相功能匹配，实现目标需求。
+3. 文档同步更新：README、设计文档（`ghc-proxy-design.md`）及项目设计过程中创建的示例。
 4. 所有脚本和配置均使用占位符，不写入真实租户 ID、密钥、token 或客户敏感信息。
 5. 利用本地环境 Azure CLI 账号和 Azure 资源执行完整的部署测试。
 

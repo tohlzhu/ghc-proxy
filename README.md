@@ -24,19 +24,29 @@
 > 合规性：GitHub 官方支持将 Copilot 作为 OpenClaw 等第三方工具的模型 Provider，本用法属此范畴。
 > 真正的封号风险来自「单账号被多人并发使用」，故核心约束是严格的 **用户 ↔ 账号 1:1 绑定**。
 
-### 技术基石：`gho_` token 直接作为 Bearer（已抓包实测）
+### 技术基石：两级 token 认证（按 OAuth 客户端自适应）
 
-抓取本机 Copilot CLI `1.0.61` 真实流量验证：**当前 CLI 直接用 `gho_` 长效 OAuth token 作为模型 API 的 Bearer**，
-不再换取短效 token（`copilot_internal/v2/token` 对 CLI token 返回 404）。
+GHC 认证有**两种形态**，取决于账号长效凭证由哪个 OAuth 客户端签发；本服务两条路径都支持（先尝试换取，404 则回退直连）：
 
-| Token | 来源 | 生命周期 | 用途 |
-|---|---|---|---|
-| **OAuth Token（`gho_`）** | GitHub Device Flow，`gho_` 前缀 | 长期有效（直到撤销/登出） | **直接**作为模型 API 的 Bearer |
+| 客户端类型 | 长效凭证 | 访问模型 API 的方式 |
+|---|---|---|
+| **编辑器 GitHub App**（如 `Iv1.b507a08c87ecfe98`） | `ghu_`（user-to-server） | **必须换取**：`GET api.github.com/copilot_internal/v2/token`（以 `Authorization: token <ghu_>` 鉴权）→ 短效 **token B**（约 25–30 分钟，带 `expires_at`），再以 token B 作 Bearer |
+| **CLI OAuth App**（`Ov23...`） | `gho_` | **直接**作 Bearer（换取端点对该 token 返回 404，scope 不含 copilot） |
 
-**关键推论**：每账号需持久化的只有一行 `gho_` token（数据库加密存储）。
-因此**管理 N 个账号无需 N 个容器 / 文件系统隔离**；凭证由 refresher 定时做存活性校验，失效则隔离待重登。
+> 本机 Copilot CLI `1.0.61`（`gho_`/CLI 客户端）实测：换取端点返回 404，`gho_` 直连即可 200。litellm / OpenCode / copilot-api 等公开实现走的是编辑器客户端的换取路径——故本服务统一支持两者。
+
+token 解析与缓存由 `CopilotTokenService` 负责：换取所得 token B 在过期前（默认预留 `liveness_skew_s` 秒）自动刷新；直连模式缓存判定结果避免每请求重探 404。**每账号需持久化的只有一行长效凭证**（数据库加密存储），因此**管理 N 个账号无需 N 个容器 / 文件系统隔离**；refresher 定时刷新 token B 并校验存活性，长效凭证失效则隔离待重登。
 
 上游同时提供：`/chat/completions`（OpenAI 风格，GPT 与 Claude 均可）、`/v1/messages`（Anthropic 原生）、`/models`、`/responses`。
+
+### 请求头构造（影响 cache 命中与异常检测）
+
+向模型 API 发请求时，按真实编辑器客户端构造完整身份头（对照 litellm `get_copilot_default_headers` 与实测 CLI 流量），错误构造会降低 prompt cache 命中率、或被判为异常客户端：
+
+- 静态身份：`Copilot-Integration-Id`、`Editor-Version`、`Editor-Plugin-Version`、`X-GitHub-Api-Version`、`OpenAI-Intent`、`User-Agent`（全部可配，见 `UpstreamConfig`）；
+- 每请求唯一 `X-Request-Id`（实测不影响 cache key）；
+- **动态 `X-Initiator`**：消息含 `assistant`/`tool` 角色判为 `agent`，否则 `user`——GHC 据此区分人工与 agent 跟进调用，硬编码 `user` 会放大 premium request 计费；
+- **`Copilot-Vision-Request: true`**：消息含图片（OpenAI `image_url` / Anthropic `image` 块）时附加。
 
 ### 总体架构
 
@@ -60,7 +70,7 @@
 ### 关键能力
 
 - **1:1 粘性绑定**：`bindings` 表对 `user_id` 与 `account_id` 双 `UNIQUE`，从存储层杜绝一账号绑定多用户；空闲账号用 `FOR UPDATE SKIP LOCKED` 原子分配。
-- **凭证长期保活**：refresher 定时校验 `gho_` 存活性；失效自动隔离账号等待重登。
+- **两级 token 自适应**：编辑器客户端（`ghu_`）经 `copilot_internal/v2/token` 换取短效 token B 并按 `expires_at` 自动刷新；CLI 客户端（`gho_`）直连。refresher 定时刷新/校验，失效自动隔离待重登；换取端点 5xx/429/网络抖动视为暂态，不隔离。
 - **自动改路由容错**：账号登录失效（401/403）时隔离该账号，从空闲池重新绑定 healthy 账号并重试本次请求（至多一次，含流式请求）。
 - **协议兼容**：同时兼容 Anthropic Messages（Claude Code）与 OpenAI 风格（Codex/OpenClaw），含 SSE 流式透传。
 - **可观测性**：prompt 请求、用量、审计事件投递 Kafka；buffered 响应同步记录响应体，流式响应不缓存完整输出；指标暴露 Prometheus（`/metrics`）。
@@ -144,10 +154,11 @@ ADMIN_TOKEN=my_admin_token \
 docker compose up -d --build
 # 管理面板：浏览 http://localhost:8081，用 my_admin_token 登录
 
-# 2) 导入一个 GHC 账号（gho_ token 由操作人员经 Device Flow 取得；这里直接导入）
+# 2) 导入一个 GHC 账号（长效凭证由操作人员经 Device Flow 取得；这里直接导入）
+#    oauth_token 可为 gho_（CLI 客户端，直连）或 ghu_（编辑器客户端，自动换取 token B）
 curl -X POST localhost:8080/admin/accounts -H "x-admin-token: my_admin_token" \
   -H 'content-type: application/json' \
-  -d '{"login":"<github-login>","oauth_token":"gho_<...>","plan":"enterprise"}'
+  -d '{"login":"<github-login>","oauth_token":"<gho_或ghu_token>","plan":"enterprise"}'
 
 # 3) 创建用户并签发代理 Key（明文 Key 仅此一次返回）
 curl -X POST localhost:8080/admin/users -H "x-admin-token: my_admin_token" \
@@ -175,7 +186,7 @@ curl localhost:8080/v1/messages -H "x-api-key: ghcp_<key>" \
 
 ```bash
 pip install -e ".[dev]"
-pytest -q          # 98 项单元/接口测试，无需外部依赖（含 25 项面板 admin 端点测试）
+pytest -q          # 140 项单元/接口测试，无需外部依赖（含 token service 两级换取 / 请求头派生 / 面板 admin 端点）
 
 # 面板前端构建（需 Node 18+）
 cd frontend && npm install && npm run build
@@ -187,10 +198,10 @@ cd frontend && npm install && npm run build
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| 可行性（凭证机制） | ✅ | 抓包实测：`gho_` 直接作 Bearer；GPT/Claude/models 均通。 |
-| 单元 + 接口测试 | ✅ | `pytest` 98 项全绿（crypto / 绑定 / 转发改路由 / 流式错误处理 / Device Flow / 用量解析 / 鉴权 / 配置 / 接口 / **面板 admin 端点 25 项**）。 |
+| 可行性（凭证机制） | ✅ | 两级 token 自适应：实测 `gho_`（CLI 客户端）换取端点 404→直连作 Bearer，GPT/Claude/models 均 200；编辑器客户端 `ghu_` 换取 token B 路径由 token service 实现并单测覆盖。 |
+| 单元 + 接口测试 | ✅ | `pytest` 140 项全绿（crypto / 绑定 / 转发改路由 / 流式错误处理 / Device Flow / 用量解析 / 鉴权 / 配置 / 接口 / **token service 两级换取** / **请求头动态派生** / **upstream 接线** / 面板 admin 端点）。 |
 | 面板前端构建 | ✅ | `npm run build` 通过（tsc 严格模式 + Vite 产物）。 |
-| 本地全栈集成 | ✅ | docker-compose 全栈，真实 `gho_` 跑通 GPT + Claude（OpenAI 与 Anthropic 两种协议）+ 流式 + 用量入库 + Kafka 事件。 |
+| 本地全栈集成 | ✅ | docker-compose 全栈，真实长效凭证经 token service 解析后跑通 GPT + Claude（OpenAI 与 Anthropic 两种协议）+ 流式 + 用量入库 + Kafka 事件；prompt cache 命中实测（`cached_tokens`>0）。 |
 | Azure 云端部署 | ✅ | `rg-dev2`（japaneast）VM 全栈（含 console 面板）；从 `vnet-dev-jpe` 经 VNet Peering 内网调用 GPT/Claude 通过；面板经 admin token 调通各端点。 |
 
 > Kafka 仅做日志/用量/审计的**生产**端；消费与数据分析不属于本项目范围（见 `todo.md`）。

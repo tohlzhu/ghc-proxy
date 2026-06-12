@@ -28,20 +28,37 @@ class ServerConfig(BaseModel):
 
 
 class UpstreamConfig(BaseModel):
-    """Headers/identity the proxy presents to the GHC model API."""
+    """Headers/identity the proxy presents to the GHC model API.
+
+    Values mirror what a real Copilot client sends; getting them right keeps
+    prompt-cache hit-rate high and avoids being flagged as an anomalous client
+    (see ghc-proxy-design.md §2.5 and litellm's ``get_copilot_default_headers``).
+    """
 
     default_api_base: str = "https://api.enterprise.githubcopilot.com"
     github_api_base: str = "https://api.github.com"
+    # Path on github_api_base that exchanges a durable OAuth token for a
+    # short-lived Copilot bearer (token B). 404 here => direct-bearer fallback.
+    token_exchange_path: str = "/copilot_internal/v2/token"
     integration_id: str = "copilot-developer-cli"
     editor_version: str = "copilot/1.0.61"
+    editor_plugin_version: str = "copilot/1.0.61"
     api_version: str = "2026-06-01"
     anthropic_version: str = "2023-06-01"
-    user_agent: str = "copilot/1.0.61 (linux v24.16.0) term/ghcproxy"
+    user_agent: str = "GitHubCopilotChat/0.26.7"
+    openai_intent: str = "conversation-panel"
 
 
 class DeviceFlowConfig(BaseModel):
-    # Public client id of the Copilot client (not a secret); placeholder.
-    client_id: str = "Iv1.b507a08c87ecfe98"
+    # Public OAuth client id of a Copilot client (not a secret). Which client
+    # you use decides the auth shape the token service must take:
+    #   * Editor GitHub App (e.g. ``Iv1.b507a08c87ecfe98``) mints ``ghu_`` →
+    #     must be EXCHANGED at copilot_internal/v2/token for a ~30 min token B.
+    #   * CLI OAuth App (``Ov23...``) mints ``gho_`` → used DIRECTLY as bearer
+    #     (exchange returns 404).
+    # The token service supports both (try-exchange, fall back to direct), so
+    # either client works. Placeholder default below; override per deployment.
+    client_id: str = "Iv1.<CLIENT_ID>"
     scope: str = "read:user"
     device_code_url: str = "https://github.com/login/device/code"
     access_token_url: str = "https://github.com/login/oauth/access_token"
