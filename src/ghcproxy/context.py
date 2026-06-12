@@ -12,6 +12,7 @@ from ghcproxy.cache import RedisCache
 from ghcproxy.common.config import Settings
 from ghcproxy.common.crypto import TokenCipher
 from ghcproxy.credential.device_flow import DeviceFlow
+from ghcproxy.credential.token_service import CopilotTokenService
 from ghcproxy.db.repo import PgRepo
 from ghcproxy.observability.sink import KafkaSink, NullSink
 from ghcproxy.proxy.forwarder import Forwarder
@@ -41,6 +42,7 @@ class AppContext:
         self.cache: RedisCache | None = None
         self.sink = None
         self.http: httpx.AsyncClient | None = None
+        self.tokens: CopilotTokenService | None = None
         self.upstream: HttpxUpstream | None = None
         self.binding: BindingService | None = None
         self.forwarder: Forwarder | None = None
@@ -54,7 +56,11 @@ class AppContext:
             min_size=self.cfg.postgres.min_pool, max_size=self.cfg.postgres.max_pool)
         self.cache = RedisCache(self.cfg.redis.url)
         self.http = httpx.AsyncClient()
-        self.upstream = HttpxUpstream(self.cfg.upstream, self.http)
+        self.tokens = CopilotTokenService(
+            self.cfg.upstream, self.http,
+            skew_s=self.cfg.refresh.liveness_skew_s)
+        self.upstream = HttpxUpstream(self.cfg.upstream, self.http,
+                                      token_service=self.tokens)
         self.binding = BindingService(self.repo)
         self.forwarder = Forwarder(self.binding, self.upstream, self.repo)
         self.device_flow = DeviceFlow(self.cfg.device_flow, _HttpxForm(self.http))

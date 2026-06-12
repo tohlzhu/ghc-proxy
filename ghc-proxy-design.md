@@ -34,18 +34,24 @@ GitHub 官方文档明确支持将 Copilot 作为 OpenClaw 等第三方工具的
 
 ## 2. 技术可行性：GHC 凭证机制（已在本机 + 云端实测验证）
 
-> 本节结论已通过 **mitmproxy 抓取本机 Copilot CLI `1.0.61`（企业版账号）真实流量**验证，并在本地与 Azure 云端部署中用真实 `gho_` 凭证完整跑通 GPT / Claude 调用。
+> 本节结论经多方交叉验证：**本机实测**（CLI `1.0.61` 的 `gho_` 凭证：换取端点 404→直连 Bearer 跑通 GPT/Claude，且 prompt cache 命中）、**公开实现源码**（litellm / OpenCode / copilot-api / stencila 的编辑器 `ghu_` 换取路径）、以及对各源结论的对抗式核验。两种认证形态都已纳入实现。
 
-### 2.1 凭证模型（设计的技术基石 —— 实测修正）
+### 2.1 凭证模型（设计的技术基石 —— 两级 token，按客户端自适应）
 
-> ⚠️ **重要修正**：早期设想 GHC 用「`gho_` 长效 → 短效 copilot token」两段式换取。抓包实测表明：**当前独立 Copilot CLI 直接用 `gho_` token 作为模型 API 的 Bearer**，并不调用 `copilot_internal/v2/token` 换取短效 token（该接口对 CLI 颁发的 `gho_` token 返回 404，因其 scope 为 `gist, read:org, read:user, repo`，不含 `copilot`）。当前实现采用**直接 Bearer**路径。
+> ⚠️ **重要结论（多方交叉验证）**：GHC 认证是**两级**的，具体走哪条路径取决于长效凭证由哪个 OAuth 客户端签发。本服务两条路径都实现（先尝试换取，404 则回退直连），由 `CopilotTokenService` 统一封装：
+>
+> - **编辑器 GitHub App**（如 `Iv1.b507a08c87ecfe98`）签发 `ghu_`（user-to-server）：**必须**以 `Authorization: token <ghu_>` 调 `GET api.github.com/copilot_internal/v2/token` 换取短效 **token B**（带 `expires_at`，约 25–30 分钟），再以 token B 作模型 API 的 Bearer。litellm / OpenCode / copilot-api / stencila 等公开实现走的就是这条。
+> - **CLI OAuth App**（`Ov23...`）签发 `gho_`：换取端点对它返回 **404**（其 scope 为 `gist, read:org, read:user, repo`，不含 `copilot`），故 `gho_` **直接**作 Bearer。本机 Copilot CLI `1.0.61` 实测即此路径。
+>
+> 早期文档仅描述了 CLI 直连一种情形；此处补全为两级自适应。
 
-| Token | 来源 | 形态 | 生命周期 | 用途 |
+| Token | 来源客户端 | 形态 | 生命周期 | 用途 |
 |---|---|---|---|---|
-| **OAuth Token（`gho_`）** | GitHub Device Flow | `gho_` 前缀，40 字符 | 长期有效（直到撤销/登出） | **直接**作为模型 API 的 Bearer；持久身份凭证 |
+| **长效 OAuth Token** | 编辑器 App → `ghu_`；CLI App → `gho_` | 40 字符前缀 token | 长期有效（直到撤销/登出） | 持久身份凭证；`gho_` 直连作 Bearer，`ghu_` 用于换取 token B |
+| **短效 Copilot Token B** | `copilot_internal/v2/token` 换取（仅 `ghu_`） | 含 `tid=...;exp=...` 的串 | 约 25–30 分钟，过期前刷新 | 编辑器客户端访问模型 API 的实际 Bearer |
 
-**关键推论**：每个账号需要**持久化的只有那一行 `gho_` token**。
-因此**管理 N 个账号无需 N 个容器 / 文件系统隔离**——只要在数据库里存 N 行加密的 `gho_` token 即可。这是整个方案成立的根基，已实测成立。
+**关键推论**：每个账号需要**持久化的只有那一行长效 token**（`gho_` 或 `ghu_`，数据库加密存储）；短效 token B 是进程内缓存、可随时按长效凭证重新换取，无需落库。
+因此**管理 N 个账号无需 N 个容器 / 文件系统隔离**——只要在数据库里存 N 行加密的长效 token 即可。这是整个方案成立的根基，已实测成立。
 
 ### 2.2 本机凭证落盘位置与结构
 
@@ -75,17 +81,22 @@ GHC CLI 把 OAuth token 落盘在 `~/.copilot/config.json`（JSONC 格式，含 
 2. 把 `verification_uri`（`https://github.com/login/device`）与 `user_code`（形如 `XXXX-XXXX`）**吐给操作人员/前端**，由真人在浏览器完成登录与设备授权；
 3. 后台按 `interval` 轮询 `POST https://github.com/login/oauth/access_token`，授权完成后即返回 `gho_` 形态的 `access_token`。
 
-> `client_id` 使用 GHC 客户端公开的 OAuth App ID（示例占位：`Iv1.<CLIENT_ID>`；公开实现中常见 VS Code Copilot 的 `Iv1.b507a08c87ecfe98`）。该值是公开客户端标识，非密钥。
+> `client_id` 使用 GHC 客户端公开的 OAuth App ID（示例占位：`Iv1.<CLIENT_ID>`，非密钥）。**该值的选择决定 token 形态与认证路径**：编辑器 GitHub App（如 `Iv1.b507a08c87ecfe98`）签发 `ghu_`，需经 `copilot_internal/v2/token` 换取 token B；CLI OAuth App（`Ov23...`）签发 `gho_`，直连作 Bearer。`CopilotTokenService` 对两者自适应，故任选其一均可工作；按部署需要在 `device_flow.client_id` 配置。
 
-### 2.4 凭证保活与刷新（实测修正）
+### 2.4 凭证保活与刷新（两级自适应）
 
-由于 `gho_` token 是长效凭证（直到登出/撤销），**无需短效 token 的定期换取**。因此 refresher 的职责变为「**主动存活性校验**」：周期性用每个账号的 `gho_` 调用 `GET {api_base}/models`：
+refresher 的每个 tick 先经 `CopilotTokenService` 解析账号的模型 API Bearer，再调 `GET {api_base}/models` 确认账号可用：
 
-- **200** → 账号健康，推后 `refresh_at`（默认 30 分钟后再查）；
-- **401 / 403 login_required** → 登录失效，隔离账号（`quarantined`），等待操作人员重新 Device Flow 授权；
-- **网络抖动 / 5xx** → 视为暂态，不隔离。
+- 对**编辑器 `ghu_` 账号**：解析时若 token B 已进入过期前窗口（`expires_at - liveness_skew_s`），自动重新换取——这一步就是「短效 token 的定期刷新」；
+- 对 **CLI `gho_` 账号**：换取 404 → 直连，解析退化为存活性探测；长效凭证本身长期有效。
 
-每账号校验由 Redis 锁（`lock:account:{id}`）保证多副本下单写者。
+据解析与探测结果：
+
+- `/models` **200** → 账号健康，推后 `refresh_at`；
+- 换取返回 **401 / 403** 或 `/models` 报 `login_required` → 长效登录失效，隔离账号（`quarantined`），等待操作人员重新 Device Flow 授权；
+- 换取端点 **5xx / 429 / 网络抖动**（`CopilotTokenUnavailable`）或 `/models` 网络错误 → 视为暂态，**不隔离**，下个 tick 重试。
+
+每账号校验由 Redis 锁（`lock:account:{id}`）保证多副本下单写者。token B 缓存为各 proxy 副本进程内状态（按长效凭证可独立重算，无需共享存储）。
 
 ### 2.5 模型 API 调用（实测取值）
 
@@ -94,22 +105,36 @@ POST {api_base}/chat/completions      # OpenAI 风格（GPT 与 Claude 均可）
 POST {api_base}/responses             # Responses API（Codex 等）
 POST {api_base}/v1/messages           # Anthropic Messages（Claude Code 原生）
 GET  {api_base}/models                # 模型列表（实测 38 个：gpt-5.x / gpt-4o / claude-opus-4.x / sonnet / haiku）
-Authorization: Bearer <GHO_OAUTH_TOKEN>
+
+# 静态身份头（全部可配，见 UpstreamConfig）
+Authorization: Bearer <token B 或直连的 gho_>
 Copilot-Integration-Id: copilot-developer-cli
 Editor-Version: copilot/1.0.61
+Editor-Plugin-Version: copilot/1.0.61
 X-GitHub-Api-Version: 2026-06-01
-X-Initiator: user
+OpenAI-Intent: conversation-panel
+User-Agent: GitHubCopilotChat/0.26.7
 anthropic-version: 2023-06-01            # 仅 /v1/messages 需要
+
+# 每请求派生头（src/ghcproxy/credential/headers.py）
+X-Request-Id: <每请求唯一 UUID>           # 实测不影响 cache key
+X-Initiator: user | agent                # 含 assistant/tool 角色→agent，否则 user
+Copilot-Vision-Request: true             # 仅当消息含图片（OpenAI image_url / Anthropic image 块）
 ```
 
-> 上述 header 是 GHC 侧校验「请求来自合法客户端」的关键，缺失会被拒（如错误的 `Copilot-Integration-Id` / `Editor-Version`）。取值随客户端版本演进，故在配置中全部可调（见 `src/ghcproxy/common/config.py` 的 `UpstreamConfig`）。`api_base` 按账号套餐而定（企业版 `api.enterprise.githubcopilot.com`）。
+> **为何重要**：这些 header 既是 GHC 校验「请求来自合法客户端」的关键（缺失或错误的 `Copilot-Integration-Id` / `Editor-Version` 会被拒），也直接影响 **prompt cache 命中率** 与 **计费/异常检测**。对照 litellm `get_copilot_default_headers`、OpenCode、实测 CLI 流量构造：
+> - **`X-Initiator` 必须动态派生**：GHC 据此区分人工消息（计费 premium request）与 agent 跟进调用（如工具循环），硬编码 `user` 会让每次 agent 迭代都被计费，成倍放大开销（cc switch 即栽在 header 构造不当导致 cache 命中低 / 异常）。
+> - **`X-Request-Id` 每请求唯一**：实测变化它不会破坏 cache（cache key 基于内容前缀），但缺失会显得不像真实客户端。
+> - 取值随客户端版本演进，故在 `src/ghcproxy/common/config.py` 的 `UpstreamConfig` 中全部可调。`api_base` 按账号套餐而定（企业版 `api.enterprise.githubcopilot.com`）。
+>
+> **实测 cache 验证**：>3500 token 共享前缀连发两次，第二次 `usage.prompt_tokens_details.cached_tokens` ≈ 3456，证明上述 header 组合下 prompt cache 正常命中。
 
 ### 2.6 需加入防火墙/代理白名单的域名
 
 依据 GitHub 官方 *Copilot allowlist reference*（HTTPS / 443）：
 
 - **认证 / 设备流**：`https://github.com/login/*`
-- **用户信息 / 兼容性探测（可选）**：`https://api.github.com/user`；当前实现不调用 `copilot_internal/*`
+- **Token 换取 / 用户信息**：`https://api.github.com/copilot_internal/*`（编辑器 `ghu_` 账号换取 token B 必经；CLI `gho_` 账号会命中 404 后回退直连）、`https://api.github.com/user`（可选）
 - **模型 API**：`https://*.githubcopilot.com/*`（含 `*.individual.` / `*.business.` / `*.enterprise.githubcopilot.com`）、`https://copilot-proxy.githubusercontent.com`、`https://origin-tracker.githubusercontent.com`
 - **遥测（可选）**：`https://copilot-telemetry.githubusercontent.com/telemetry`、`https://collector.github.com/*`
 - **实验配置（可选）**：`https://default.exp-tas.com`
@@ -127,7 +152,7 @@ anthropic-version: 2023-06-01            # 仅 /v1/messages 需要
  Claude Code ─┐           │                     GHC Proxy 镜像                     │
  Codex        ┼─ proxy ──▶│  [proxy 角色 · 无状态 · HPA 扩缩]                       │
  OpenClaw     ┘  key      │   Ingress Adapters → Router/Binding → Credential Svc    │──▶ api.<plan>.githubcopilot.com
-                          │   (协议直通/透传)      (1:1 粘性)   (gho_ Bearer)      │   /chat/completions /responses /models
+                          │   (协议直通/透传)      (1:1 粘性)  (两级token自适应)  │   /chat/completions /responses /models
                           │                                                        │
                           │  [refresher 角色 · 抢锁单例]                            │
                           │   存活性校验 · 健康检查/隔离                            │
@@ -149,8 +174,8 @@ anthropic-version: 2023-06-01            # 仅 /v1/messages 需要
 | **Ingress Adapters** | 终结前端协议；将 Anthropic Messages 与 OpenAI 风格请求归一化为内部 canonical 请求；流式响应回译。提供 `/v1/messages`（Anthropic）与 `/v1/chat/completions`、`/v1/responses`、`/v1/models`（OpenAI 直通）。 | — |
 | **Auth & Key** | 校验前端 `proxy key`，解析出 `user_id`；Key 查找结果走 Redis 短缓存。 | PG/Redis |
 | **Router / Binding** | 维护「user ↔ account」1:1 粘性绑定；绑定缺失或账号不健康时分配空闲账号；并发上限（每账号至多 1 个活跃用户）。 | PG/Redis |
-| **Credential Svc** | 解密账号 `gho_` token，附加客户端 header，以 Bearer 直接调用模型 API；处理上游 401/限流。 | PG/Redis |
-| **Refresher Worker** | 周期扫描到期账号并调用 `/models` 做存活性校验；账号健康探测与隔离。 | PG/Redis |
+| **Credential Svc** | 解密账号长效 token；经 `CopilotTokenService` 解析 Bearer（`ghu_` 换取并缓存 token B / `gho_` 直连），附加完整客户端 header（含动态 `X-Initiator`、`Copilot-Vision-Request`）调用模型 API；处理上游 401/403/限流（401/403→改路由，暂态→透传）。 | PG/Redis |
+| **Refresher Worker** | 周期扫描到期账号，刷新将过期的 token B 并调用 `/models` 做存活性校验；登录失效隔离、暂态不隔离。 | PG/Redis |
 | **Admin API** | 账号导入、发起登录、轮询完成 Device Flow、查看账号、签发 Key。 | PG |
 | **Observability** | 把 prompt、用量、审计事件投递 Kafka；指标暴露 Prometheus。 | Kafka |
 
@@ -167,9 +192,9 @@ Client                Proxy(Ingress→Auth→Router→Cred)         Redis/PG    
   │                       校验 key → user_id│  key 短缓存/PG      │            │
   │                       查/建 binding     ├──PG 原子分配──────▶│            │
   │                          ◀── account_id ┤◀───────────────────┤            │
-  │                       解密 gho_ token    │                    │            │
+  │            解密长效 token → 解析 Bearer  │  (ghu_:换取/缓存 token B; gho_:直连) │
   │             协议直通 / SSE 透传          │                    │            │
-  │                                         ├── POST /chat/completions (Bearer gho_) ─▶
+  │                                         ├── POST /chat/completions (Bearer token B 或 gho_) ─▶
   │                                         │            (SSE 流式)            ◀──────────────────
   │   ◀── 上游响应 / SSE 透传 ──────────────┤                    │            │
   │                                         ├──▶ Kafka: prompt 日志 / usage    │
@@ -182,11 +207,12 @@ Client                Proxy(Ingress→Auth→Router→Cred)         Redis/PG    
 ```
                 Refresher                       Redis                 GHC
  due account ─────────────────────────────────▶ SET lock:account:{id} NX EX
-            用账号 gho_ 构造 Bearer header ───────────────────────────▶ GET /models
+            解析 Bearer（ghu_:刷新将过期 token B; gho_:直连）──▶ (copilot_internal/v2/token)
+            用解析出的 Bearer 构造 header ─────────────────────────────▶ GET /models
             ◀── 200 / 401 / 403 / 5xx ─────────────────────────────────────────────
             200: 写 last_seen_at/refresh_at 到 PG
-            401/403 login_required: quarantine account + audit
-            5xx/网络抖动: 保持原状态，等待下次扫描
+            换取或 /models 报 401/403 login_required: quarantine account + audit
+            换取 5xx/429 / 网络抖动: 保持原状态，等待下次扫描
 ```
 
 Refresher Worker 独立地周期扫描 `refresh_at <= now` 的账号，降低用户流量首次遇到失效凭证的概率。
@@ -206,6 +232,8 @@ Cred Svc ── /chat/completions 或 SSE ─▶ GHC
 ```
 
 > 「主动刷新」让登出尽量不发生；「自动改路由」是兜底。两者叠加实现前端无感的长期保活。
+>
+> token 解析失败也归一到本机制：`CopilotTokenService` 抛 `CopilotAuthExpired`（换取 401/403，长效登录已死）时，`HttpxUpstream` 合成 **401** 上游响应 → 触发上面的隔离+改路由；抛 `CopilotTokenUnavailable`（换取 5xx/429/网络抖动，暂态）时合成 **503** 透传，**不隔离**、不消耗账号，由客户端重试。
 
 ### 4.4 Device Flow 账号上线（操作人员）
 
@@ -216,7 +244,7 @@ Operator/Admin UI        Admin API                      GHC
   │ ◀── 展示「访问 github.com/login/device 输入 XXXX-XXXX」┤
   │ (真人浏览器完成授权)                                   │
   │ POST /admin/accounts/{login}/login/poll ─────────────▶ POST /login/oauth/access_token
-  │                    ◀── gho_ access_token ─────────────
+  │              ◀── 长效 access_token（gho_/ghu_，依客户端）──
   │                       加密存 PG(accounts.oauth_token)  │
   │                       account 置为 healthy/idle        │
 ```
@@ -312,13 +340,15 @@ src/ghcproxy/
 ├── __main__.py                 # 进程入口：ROLE=proxy | refresher
 ├── context.py                  # 依赖装配（PG/Redis/Kafka/httpx/binding/forwarder）
 ├── common/
-│   ├── config.py               # Pydantic 配置（YAML + 环境变量覆盖；upstream header 取值）
-│   ├── crypto.py               # gho_ token 的 AES-256-GCM 信封加密
+│   ├── config.py               # Pydantic 配置（YAML + 环境变量覆盖；upstream header / 换取端点取值）
+│   ├── crypto.py               # 长效 token 的 AES-256-GCM 信封加密
 │   └── keys.py                 # 代理 Key 生成 / SHA-256 哈希 / 校验
 ├── credential/
-│   ├── client.py               # 上游 header 构造 + 登录失效判定
-│   ├── device_flow.py          # GitHub Device Flow（吐 user_code，轮询取 gho_）
-│   └── refresher.py            # 存活性校验 worker（抢锁单例 + 心跳）
+│   ├── client.py               # 上游 header 构造（静态身份 + 派生头）+ 登录失效判定
+│   ├── headers.py              # 每请求派生 X-Initiator（user/agent）与 Copilot-Vision-Request
+│   ├── token_service.py        # 两级 token 自适应：copilot_internal/v2/token 换取+缓存+刷新，404→直连
+│   ├── device_flow.py          # GitHub Device Flow（吐 user_code，轮询取长效 token）
+│   └── refresher.py            # token B 刷新 + 存活性校验 worker（抢锁单例 + 心跳）
 ├── router/binding.py           # 1:1 粘性绑定与空闲账号原子分配 + 失效改路由
 ├── proxy/
 │   ├── app.py                  # FastAPI 入口：鉴权→绑定→转发→用量/prompt 投 Kafka
@@ -342,7 +372,7 @@ deploy/
 └── k8s/                        # namespace / config+secret / proxy(Deploy+Svc+HPA) / refresher / console
 ```
 
-> 该实现已通过 98 项单元/接口测试（含 25 项面板 admin 端点测试），并在本地与 **Azure（rg-dev2，VNet 内）docker-compose 全栈**中用真实 `gho_` 凭证跑通 GPT 与 Claude 调用（OpenAI `/chat/completions` 与 Anthropic `/v1/messages` 均验证）。
+> 该实现已通过 140 项单元/接口测试（含 token service 两级换取、请求头动态派生、upstream 接线、面板 admin 端点），并在本地与 **Azure（rg-dev2，VNet 内）docker-compose 全栈**中经 `CopilotTokenService` 解析后用真实凭证跑通 GPT 与 Claude 调用（OpenAI `/chat/completions` 与 Anthropic `/v1/messages` 均验证，prompt cache 命中实测）。
 > `examples/` 保留早期 TypeScript 说明性骨架，仅供对照，非运行产物。
 
 ---
