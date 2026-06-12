@@ -84,10 +84,12 @@ class PgRepo:
             "UPDATE accounts SET status='quarantined', last_error=$2, updated_at=now() "
             "WHERE id=$1", account_id, error)
 
-    async def set_account_status(self, account_id: str, status: str) -> None:
-        await self._pool.execute(
-            "UPDATE accounts SET status=$2, updated_at=now() WHERE id=$1",
+    async def set_account_status(self, account_id: str, status: str) -> bool:
+        row = await self._pool.fetchrow(
+            "UPDATE accounts SET status=$2, updated_at=now() "
+            "WHERE id=$1 RETURNING id",
             account_id, status)
+        return row is not None
 
     async def mark_seen(self, account_id: str, refresh_at: dt.datetime) -> None:
         await self._pool.execute(

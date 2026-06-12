@@ -78,6 +78,23 @@ async def test_login_expiry_with_no_spare_raises(repo):
     assert repo.accounts["acc1"].status == "quarantined"
 
 
+async def test_replacement_login_expiry_quarantines_and_releases_binding(repo):
+    up = FakeUpstream()
+    fwd = Forwarder(BindingService(repo), up, repo)
+    repo.add_account("acc1", status="idle")
+    repo.add_account("acc2", status="idle")
+    up.set("acc1", 401, b"bad creds")
+    up.set("acc2", 401, b"bad creds")
+
+    res = await fwd.handle("userA", path="/v1/messages", method="POST",
+                           headers={}, body=b"{}", anthropic=True)
+    assert res.status == 401
+    assert up.calls == ["acc1", "acc2"]
+    assert repo.accounts["acc1"].status == "quarantined"
+    assert repo.accounts["acc2"].status == "quarantined"
+    assert "userA" not in repo.bindings
+
+
 async def test_rate_limit_passes_through_without_quarantine(repo):
     up = FakeUpstream()
     fwd = Forwarder(BindingService(repo), up, repo)

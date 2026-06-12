@@ -228,6 +228,28 @@ def test_streaming_login_expiry_rebinds_and_retries():
     assert ctx.sink.usage_events[0]["account_id"] == "acc2"
 
 
+def test_streaming_replacement_login_expiry_quarantines_and_releases():
+    ctx, repo = _make()
+    repo.add_account("acc1", status="idle")
+    repo.add_account("acc2", status="idle")
+    ctx.upstream.stream_by_account["acc1"] = FakeStreamResp(
+        status_code=401, chunks=[b'{"message":"Bad credentials"}'],
+        headers={"content-type": "application/json"})
+    ctx.upstream.stream_by_account["acc2"] = FakeStreamResp(
+        status_code=401, chunks=[b'{"message":"Bad credentials"}'],
+        headers={"content-type": "application/json"})
+    key = _seed_user_key(repo)
+    client = TestClient(create_app(ctx))
+    r = client.post("/v1/chat/completions",
+                    headers={"authorization": f"Bearer {key}"},
+                    json={"model": "gpt-4o", "messages": [], "stream": True})
+    assert r.status_code == 401
+    assert ctx.upstream.stream_calls == ["acc1", "acc2"]
+    assert repo.accounts["acc1"].status == "quarantined"
+    assert repo.accounts["acc2"].status == "quarantined"
+    assert "u1" not in repo.bindings
+
+
 def test_admin_closed_by_default_when_no_token():
     # regression: with no admin token configured the admin API must be CLOSED.
     ctx, repo = _make()

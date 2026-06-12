@@ -249,6 +249,8 @@ class FakeRepo:
         acc = self.accounts.get(account_id)
         if acc:
             acc.status = status
+            return True
+        return False
 
     async def list_accounts(self):
         return [

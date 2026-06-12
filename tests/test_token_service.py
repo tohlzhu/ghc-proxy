@@ -117,6 +117,12 @@ async def test_404_falls_back_to_direct_bearer():
     assert bearer == "gho_CLI"
 
 
+async def test_404_for_editor_token_is_transient_not_direct():
+    svc, _ = _svc([FakeResp(404, content=b'{"message":"Not Found"}')])
+    with pytest.raises(CopilotTokenUnavailable):
+        await svc.bearer_for(Acct(oauth_token="ghu_EDITOR"))
+
+
 async def test_direct_mode_is_cached_and_not_reprobed_each_call():
     clock = Clock(1000.0)
     svc, _ = _svc([FakeResp(404)], clock=clock, direct_ttl_s=1800)
@@ -153,6 +159,24 @@ async def test_429_on_exchange_is_transient():
 
 async def test_network_error_on_exchange_is_transient():
     svc, _ = _svc([ConnectionError("boom")])
+    with pytest.raises(CopilotTokenUnavailable):
+        await svc.bearer_for(Acct())
+
+
+async def test_invalid_json_exchange_200_is_transient():
+    svc, _ = _svc([FakeResp(200, None, content=b"not json")])
+    with pytest.raises(CopilotTokenUnavailable):
+        await svc.bearer_for(Acct())
+
+
+async def test_missing_token_exchange_200_is_transient():
+    svc, _ = _svc([FakeResp(200, {"expires_at": 9999999999})])
+    with pytest.raises(CopilotTokenUnavailable):
+        await svc.bearer_for(Acct())
+
+
+async def test_empty_token_exchange_200_is_transient():
+    svc, _ = _svc([FakeResp(200, {"token": "", "expires_at": 9999999999})])
     with pytest.raises(CopilotTokenUnavailable):
         await svc.bearer_for(Acct())
 

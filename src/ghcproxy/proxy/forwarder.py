@@ -64,4 +64,8 @@ class Forwarder:
             )
             result.account_id = new_binding.account_id
             result.rebound = True
+            if is_login_expired(result.status, result.body):
+                await self._accounts.quarantine_account(
+                    new_binding.account_id, "retry: login expired")
+                await self._accounts.release_binding(user_id)
         return result

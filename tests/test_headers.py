@@ -62,6 +62,11 @@ def test_initiator_is_agent_when_tool_message_present():
     assert derive_initiator(body) == "agent"
 
 
+def test_initiator_is_agent_for_responses_function_output():
+    body = b'{"input":[{"type":"function_call_output","call_id":"c1","output":"ok"}]}'
+    assert derive_initiator(body) == "agent"
+
+
 def test_initiator_handles_non_json_body():
     assert derive_initiator(b"not json") == "user"
     assert derive_initiator(b"") == "user"
@@ -88,6 +93,12 @@ def test_vision_detected_openai_image_url():
 def test_vision_detected_anthropic_image_block():
     body = (b'{"messages":[{"role":"user","content":['
             b'{"type":"image","source":{"type":"base64","data":"AAA"}}]}]}')
+    assert has_vision_content(body) is True
+
+
+def test_vision_detected_responses_input_image():
+    body = (b'{"input":[{"role":"user","content":['
+            b'{"type":"input_image","image_url":"data:image/png;base64,A"}]}]}')
     assert has_vision_content(body) is True
 
 

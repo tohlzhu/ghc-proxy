@@ -131,6 +131,13 @@ export interface DeviceFlowStart {
   interval: number;
   expires_in: number;
 }
+export interface DeviceFlowPoll {
+  login: string;
+  status: "pending" | "idle";
+  account_id?: string;
+  reason?: string;
+  interval?: number;
+}
 
 // ---- endpoints ----------------------------------------------------------
 
@@ -175,7 +182,7 @@ export const api = {
   startLogin: (login: string) =>
     request<DeviceFlowStart>(`/accounts/${login}/login/start`, { method: "POST" }),
   pollLogin: (login: string) =>
-    request<unknown>(`/accounts/${login}/login/poll`, { method: "POST" }),
+    request<DeviceFlowPoll>(`/accounts/${login}/login/poll`, { method: "POST" }),
 
   listBindings: () => request<BindingRow[]>("/bindings"),
   releaseBinding: (userId: string) =>

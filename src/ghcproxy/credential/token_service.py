@@ -117,12 +117,24 @@ class CopilotTokenService:
                 f"exchange request failed for account {account.id}: {exc}") from exc
         status = resp.status_code
         if status == 200:
-            body = resp.json()
+            try:
+                body = resp.json()
+            except ValueError as exc:
+                raise CopilotTokenUnavailable(
+                    f"exchange returned invalid JSON for account {account.id}") from exc
+            if (not isinstance(body, dict)
+                    or not isinstance(body.get("token"), str)
+                    or not body["token"]):
+                raise CopilotTokenUnavailable(
+                    f"exchange returned malformed token payload for account {account.id}")
             token_b = body["token"]
             self._cache[account.id] = _Entry(
                 token_b, self._token_b_refresh_after(body), direct=False)
             return token_b
         if status == 404:
+            if str(account.oauth_token).startswith("ghu_"):
+                raise CopilotTokenUnavailable(
+                    f"exchange returned 404 for editor token on account {account.id}")
             # CLI-minted durable token: no exchange, use it directly. Cache the
             # decision so we don't re-probe the 404 on every request.
             self._cache[account.id] = _Entry(

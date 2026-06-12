@@ -1,6 +1,6 @@
 import { NavLink, Navigate, Route, Routes, useNavigate } from "react-router-dom";
-import { useState } from "react";
-import { clearToken, isAuthed } from "./auth";
+import { useEffect, useState } from "react";
+import { AUTH_CHANGED, clearToken, isAuthed } from "./auth";
 import Login from "./pages/Login";
 import Bindings from "./pages/Bindings";
 import Usage from "./pages/Usage";
@@ -43,8 +43,13 @@ function Shell() {
 }
 
 export default function App() {
-  // re-render on login/logout via a tick bumped by the Login page
+  // Re-render on login/logout and on API-triggered auth failures.
   const [, setTick] = useState(0);
+  useEffect(() => {
+    const bump = () => setTick((t) => t + 1);
+    window.addEventListener(AUTH_CHANGED, bump);
+    return () => window.removeEventListener(AUTH_CHANGED, bump);
+  }, []);
   const authed = isAuthed();
   return (
     <Routes>

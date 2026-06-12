@@ -20,31 +20,38 @@ import json
 from typing import Any
 
 _AGENT_ROLES = {"assistant", "tool"}
+_AGENT_RESPONSE_TYPES = {"function_call", "function_call_output"}
 
 
-def _load_messages(body: bytes) -> list[dict]:
+def _load_message_items(body: bytes) -> list[dict]:
     try:
         obj = json.loads(body)
     except (ValueError, TypeError):
         return []
     if not isinstance(obj, dict):
         return []
+    items: list[dict] = []
     msgs = obj.get("messages")
-    return msgs if isinstance(msgs, list) else []
+    if isinstance(msgs, list):
+        items.extend(msg for msg in msgs if isinstance(msg, dict))
+    response_input = obj.get("input")
+    if isinstance(response_input, list):
+        items.extend(item for item in response_input if isinstance(item, dict))
+    return items
 
 
 def derive_initiator(body: bytes) -> str:
     """``"agent"`` if any message role is assistant/tool, else ``"user"``."""
-    for msg in _load_messages(body):
-        if isinstance(msg, dict) and msg.get("role") in _AGENT_ROLES:
+    for msg in _load_message_items(body):
+        if (msg.get("role") in _AGENT_ROLES
+                or msg.get("type") in _AGENT_RESPONSE_TYPES):
             return "agent"
     return "user"
 
 
 def _content_has_image(content: Any) -> bool:
-    if not isinstance(content, list):
-        return False
-    for part in content:
+    parts = content if isinstance(content, list) else [content]
+    for part in parts:
         if not isinstance(part, dict):
             continue
         ptype = part.get("type")
@@ -56,7 +63,7 @@ def _content_has_image(content: Any) -> bool:
 
 def has_vision_content(body: bytes) -> bool:
     """True if any message carries image content (OpenAI or Anthropic shape)."""
-    for msg in _load_messages(body):
-        if isinstance(msg, dict) and _content_has_image(msg.get("content")):
+    for msg in _load_message_items(body):
+        if _content_has_image(msg) or _content_has_image(msg.get("content")):
             return True
     return False

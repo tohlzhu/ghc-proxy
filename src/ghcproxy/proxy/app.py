@@ -153,6 +153,16 @@ def create_app(ctx) -> FastAPI:
                 cm, resp = await _open_stream(account, request, upstream_path, body, anthropic)
                 account_id = new_binding.account_id
                 rebound = True
+                retry_auth_error_body = await _read_auth_error_body(resp, cm)
+                if retry_auth_error_body is not None:
+                    if is_login_expired(resp.status_code, retry_auth_error_body):
+                        await ctx.repo.quarantine_account(account_id, "retry: login expired")
+                        await ctx.repo.release_binding(user_id)
+                    metrics.REQUESTS.labels(protocol, metrics.status_class(resp.status_code)).inc()
+                    metrics.REBINDS.inc()
+                    return Response(
+                        content=retry_auth_error_body, status_code=resp.status_code,
+                        media_type=resp.headers.get("content-type", "application/json"))
             else:
                 metrics.REQUESTS.labels(protocol, metrics.status_class(resp.status_code)).inc()
                 return Response(content=auth_error_body, status_code=resp.status_code,

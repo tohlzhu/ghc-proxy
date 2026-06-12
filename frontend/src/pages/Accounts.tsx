@@ -46,14 +46,18 @@ export default function Accounts() {
   const poll = async (login: string) => {
     setPollMsg("Polling…");
     try {
-      await api.pollLogin(login);
-      setPollMsg("Authorized — account is back online.");
+      const res = await api.pollLogin(login);
+      if (res.status === "pending") {
+        const hint = res.interval ? ` Try again in about ${res.interval}s.` : "";
+        const reason = res.reason ? ` (${res.reason})` : "";
+        setPollMsg(`Still pending${reason}.${hint}`);
+        return;
+      }
+      setPollMsg("Authorized - account is back online.");
       await load();
     } catch (e) {
-      // 202 (pending) is surfaced by the wrapper as a non-ok ApiError too;
-      // give the operator a clear hint to keep waiting.
       setPollMsg(
-        e instanceof Error ? `Still pending or failed: ${e.message}` : "still pending",
+        e instanceof Error ? `Polling failed: ${e.message}` : "polling failed",
       );
     }
   };

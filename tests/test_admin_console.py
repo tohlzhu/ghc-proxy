@@ -346,6 +346,12 @@ def test_change_account_status_rejects_invalid():
     assert r.status_code == 400
 
 
+def test_change_account_status_missing_account_returns_404():
+    client, repo, _ = _client()
+    r = client.patch("/admin/accounts/missing/status", headers=H, json={"status": "idle"})
+    assert r.status_code == 404
+
+
 # --------------------------------------------------------------------------
 # bindings
 # --------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 import { FormEvent, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { setToken } from "../auth";
-import { api } from "../api";
+import { clearToken, setToken } from "../auth";
+import { api, AuthError, ApiError } from "../api";
 import { ErrorLine } from "../components";
 
 export default function Login({ onLogin }: { onLogin: () => void }) {
@@ -20,8 +20,15 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
       await api.listAccounts();
       onLogin();
       navigate("/usage");
-    } catch {
-      setError("Invalid admin token.");
+    } catch (e) {
+      clearToken();
+      if (e instanceof AuthError) {
+        setError("Invalid admin token.");
+      } else if (e instanceof ApiError) {
+        setError(`Admin API error: ${e.message}`);
+      } else {
+        setError("Could not reach admin API.");
+      }
     } finally {
       setBusy(false);
     }

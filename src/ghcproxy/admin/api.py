@@ -203,7 +203,9 @@ def build_admin_router(ctx) -> APIRouter:
         require_admin(x_admin_token)
         if req.status not in _OPERATOR_ACCOUNT_STATUSES:
             raise HTTPException(status_code=400, detail="invalid account status")
-        await ctx.repo.set_account_status(account_id, req.status)
+        ok = await ctx.repo.set_account_status(account_id, req.status)
+        if not ok:
+            raise HTTPException(status_code=404, detail="account not found")
         return {"account_id": account_id, "status": req.status}
 
     @router.get("/bindings")
