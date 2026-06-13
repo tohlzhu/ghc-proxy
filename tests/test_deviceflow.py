@@ -11,6 +11,7 @@ from ghcproxy.common.config import DeviceFlowConfig
 from ghcproxy.credential.device_flow import (
     DeviceFlow,
     DeviceCode,
+    DeviceFlowError,
     AuthorizationPending,
 )
 
@@ -86,3 +87,60 @@ async def test_request_device_code_sends_client_id_and_scope(flow, http):
     url, data = http.calls[-1]
     assert data["client_id"] == DeviceFlowConfig().client_id
     assert data["scope"] == DeviceFlowConfig().scope
+
+
+async def test_request_device_code_rejects_placeholder_client_id():
+    """A placeholder client_id (e.g. the docs default 'Iv1.<CLIENT_ID>') would
+    make GitHub return 404 with an opaque body. Catch it before the network and
+    raise a clear, actionable error so the operator knows to configure
+    GHCPROXY_DEVICE_FLOW__CLIENT_ID."""
+    http = FakeHTTP()
+    flow = DeviceFlow(DeviceFlowConfig(client_id="Iv1.<CLIENT_ID>"), http)
+    with pytest.raises(DeviceFlowError) as ei:
+        await flow.request_device_code()
+    assert "client_id" in str(ei.value).lower()
+    # must NOT have hit the network with a bogus client id
+    assert http.calls == []
+
+
+# ---------------------------------------------------------------------------
+# _HttpxForm adapter: transport errors must surface as DeviceFlowError so the
+# admin endpoint can map them to a clean 502 (not bubble up as an opaque 500).
+# This is the failure mode seen when the host has no egress to github.com.
+# ---------------------------------------------------------------------------
+
+class _RaisingClient:
+    """Fake httpx client whose post() raises a transport error."""
+
+    def __init__(self, exc):
+        self._exc = exc
+
+    async def post(self, url, data=None, headers=None):
+        raise self._exc
+
+
+async def test_httpxform_translates_transport_error_to_device_flow_error():
+    import httpx
+
+    from ghcproxy.context import _HttpxForm
+
+    form = _HttpxForm(_RaisingClient(httpx.ConnectTimeout("timed out")))
+    with pytest.raises(DeviceFlowError) as ei:
+        await form.post_form("https://github.com/login/device/code", {}, {})
+    msg = str(ei.value).lower()
+    assert "github" in msg or "reach" in msg or "network" in msg
+
+
+async def test_request_device_code_surfaces_transport_error_as_device_flow_error():
+    """End-to-end at the DeviceFlow level: a transport failure from the http
+    adapter must come out as DeviceFlowError, which start_login maps to 502."""
+    import httpx
+
+    from ghcproxy.context import _HttpxForm
+
+    flow = DeviceFlow(
+        DeviceFlowConfig(),  # valid default client_id, so we reach the network
+        _HttpxForm(_RaisingClient(httpx.ConnectError("no route"))),
+    )
+    with pytest.raises(DeviceFlowError):
+        await flow.request_device_code()

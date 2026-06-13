@@ -7,13 +7,17 @@ server:
   port: 8080
   max_users_per_account: 1     # 强制 1:1 绑定
 
-# 操作人员 Device Flow 登录所用的公开 OAuth 客户端（非密钥）。
-# 两种客户端决定 token 形态与认证方式（token service 两条路径都支持）：
+# 操作人员 Device Flow 登录所用的公开 OAuth 客户端 ID（非密钥：每次 device-flow
+# 请求都明文携带，litellm/copilot-api 等公开实现亦内置该值）。两种客户端决定 token
+# 形态与认证方式（token service 两条路径都支持）：
+#   * CLI OAuth App（Ov23ctDVkRmgkPke0Mmm）→ 颁发 gho_，直接作 Bearer（换取端点返回
+#     404）。这是默认值，与 upstream.integration_id=copilot-developer-cli 一致；
 #   * 编辑器 GitHub App（如 Iv1.b507a08c87ecfe98）→ 颁发 ghu_，必须经
-#     copilot_internal/v2/token 换取 ~30 分钟短效 token B；
-#   * CLI OAuth App（Ov23...）→ 颁发 gho_，直接作 Bearer（换取端点返回 404）。
+#     copilot_internal/v2/token 换取 ~30 分钟短效 token B。
+# 注意：若把 client_id 配成占位符（含 < >），GitHub 的 POST /login/device/code 会返回
+# 404，Re-login 将失败（后端会以 502 + 明确文案提示去配置该值）。
 device_flow:
-  client_id: "Iv1.<CLIENT_ID>"   # 占位；按部署选择编辑器或 CLI 客户端 ID
+  client_id: "Ov23ctDVkRmgkPke0Mmm"   # 默认 CLI 客户端；如需编辑器客户端改为 Iv1.<CLIENT_ID>
   scope: "read:user"
   device_code_url: "https://github.com/login/device/code"
   access_token_url: "https://github.com/login/oauth/access_token"

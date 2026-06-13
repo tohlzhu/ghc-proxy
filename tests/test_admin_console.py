@@ -382,3 +382,57 @@ def test_manual_release_returns_account_to_idle():
     assert r.status_code == 200
     assert "u1" not in repo.bindings
     assert repo.accounts["acc1"].status == "idle"
+
+
+# --------------------------------------------------------------------------
+# device-flow re-login: start endpoint
+# --------------------------------------------------------------------------
+
+class _OkDeviceFlow:
+    """Stub DeviceFlow whose request_device_code succeeds."""
+
+    async def request_device_code(self):
+        from ghcproxy.credential.device_flow import DeviceCode
+        return DeviceCode(
+            device_code="DEV", user_code="ABCD-1234",
+            verification_uri="https://github.com/login/device",
+            interval=5, expires_in=900)
+
+
+class _FailingDeviceFlow:
+    """Stub DeviceFlow whose request_device_code raises (e.g. GitHub 404)."""
+
+    async def request_device_code(self):
+        from ghcproxy.credential.device_flow import DeviceFlowError
+        raise DeviceFlowError("device code request failed: 404 {'error': 'Not Found'}")
+
+
+def test_start_login_returns_user_code_and_verification_uri():
+    ctx, repo = _make()
+    ctx.device_flow = _OkDeviceFlow()
+    client = TestClient(create_app(ctx))
+    r = client.post("/admin/accounts/octo-1/login/start", headers=H)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["user_code"] == "ABCD-1234"
+    assert body["verification_uri"] == "https://github.com/login/device"
+    assert body["login"] == "octo-1"
+
+
+def test_start_login_maps_device_flow_error_to_502_not_500():
+    """A device-flow failure (e.g. misconfigured client_id -> GitHub 404) must
+    surface as a clean 502 with a readable detail, not an unhandled 500."""
+    ctx, repo = _make()
+    ctx.device_flow = _FailingDeviceFlow()
+    client = TestClient(create_app(ctx), raise_server_exceptions=False)
+    r = client.post("/admin/accounts/octo-1/login/start", headers=H)
+    assert r.status_code == 502
+    assert "device code request failed" in r.json()["detail"]
+
+
+def test_start_login_without_device_flow_configured_returns_501():
+    ctx, repo = _make()
+    ctx.device_flow = None
+    client = TestClient(create_app(ctx))
+    r = client.post("/admin/accounts/octo-1/login/start", headers=H)
+    assert r.status_code == 501

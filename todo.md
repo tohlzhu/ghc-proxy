@@ -1,6 +1,6 @@
 # TODO
 
-新增需求：核实、修复 GHC 验证机制和请求头格式。
+修复 account Re-login 功能。
 
 ## 需求背景
 
@@ -13,30 +13,86 @@
    `X-Admin-Token` 头鉴权）。缺少可视化手段查看账号绑定、token 用量、管理用户与 Key、管理后端账号状态。
 3. **prompt 日志不在本需求范围内**：prompt 明细只流转给 Kafka，未留存在数据库，面板不提供 prompt
    日志的读取/检索能力。
-4. 当前 workspace 所在服务器已经登录一个 GHC 账号，你可以分析它的登录凭证保存机制来了解技术实现路径；
+4. 当前 workspace 所在服务器已经登录一个 GHC 账号，你可以分析它的登录凭证保存机制来了解技术实现路径，也可以用它的 copilotTokens 执行测试，配置文件路径为 `/home/azureuser/.copilot/config.json`；测试时没有人类配合你执行 GitHub device flow 的浏览器登录授权，请在成功获得 device code 后跳过浏览器登录、授权设备的过程，在任务结束时指出你无法自动测试的部分功能。
 5. 当前 shell 环境登录了一个 azure 账号，订阅名为 ME-MngEnvMCAP012397-zhuhonglei-1，如有必要可以用 azure cli 在 japan east 区域创建资源组 rg-dev2 部署必要的云资源，完成测试等开发任务（当前 workspace 所在 VM 位于 vnet-dev-jpe VNet 下，从当前服务器发起到测试资源的请求需要先打通 VNet Peering 才能基于内网 IP 访问，注意自己查询资源和网络现状）；**rg-dev2 和内部资源在前序实现时已经创建，可以重用；**
 
 ## 任务需求
 
-本项目中将 github copilot 请求服务器的过程理解为基于 gho_ 的单一验证机制，并且声称测试过了属实。但是我从其他信息源看到的反馈是：
+我通过 `docker compose` 启动，在浏览器测试 `Backend GHC Accounts` 页面中的 `Re-login` 按钮发现前端页面报 `500 Internal Server Error` 错，docker-proxy-1 容器的输出显示如下错误：
 
-- GHC 认证方式是两级的：第一层登录的 token A （gho/ghu 的key）是长效的，至少能用 1 年；第二层验证是用 gho 向github copilot 获取临时 token B 用于访问 GHC API，这个 token B 的过期时间 30 分钟，需要定期刷新；
-- 最终用 token B 访问 GHC API 的 http 请求 header 也要构造，多参考 OpenClaw/OpenCode/litellm 的实现，如果实现的不好会影响 Cache，也可能被后台抓为异常；（比如 cc switch 就没构造好这个，造成 cache 命中低等问题）；
+```txt
 
-请整体分析 ghc-proxy 项目代码，搜索网络，调研核实后回答：
+huhonglei@honglei-book1:~/github/ghc-proxy/deploy/docker$ docker attach docker-proxy-1
+INFO:     127.0.0.1:39846 - "GET /healthz HTTP/1.1" 200 OK
+2026-06-12 13:47:45,095 INFO httpx HTTP Request: POST https://github.com/login/device/code "HTTP/1.1 404 Not Found"
+INFO:     172.18.0.7:58276 - "POST /admin/accounts/zhuhonglei_microsoft/login/start HTTP/1.0" 500 Internal Server Error
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/site-packages/uvicorn/protocols/http/httptools_impl.py", line 421, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/uvicorn/middleware/proxy_headers.py", line 62, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/fastapi/applications.py", line 1159, in __call__
+    await super().__call__(scope, receive, send)
+  File "/usr/local/lib/python3.12/site-packages/starlette/applications.py", line 90, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/usr/local/lib/python3.12/site-packages/starlette/middleware/errors.py", line 186, in __call__
+    raise exc
+  File "/usr/local/lib/python3.12/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/usr/local/lib/python3.12/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/usr/local/lib/python3.12/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/usr/local/lib/python3.12/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/usr/local/lib/python3.12/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/usr/local/lib/python3.12/site-packages/starlette/routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/usr/local/lib/python3.12/site-packages/starlette/routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "/usr/local/lib/python3.12/site-packages/starlette/routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "/usr/local/lib/python3.12/site-packages/fastapi/routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/usr/local/lib/python3.12/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/usr/local/lib/python3.12/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/usr/local/lib/python3.12/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/fastapi/routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/fastapi/routing.py", line 328, in run_endpoint_function
+    return await dependant.call(**values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/ghcproxy/admin/api.py", line 231, in start_login
+    dc = await ctx.device_flow.request_device_code()
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/ghcproxy/credential/device_flow.py", line 56, in request_device_code
+    raise DeviceFlowError(f"device code request failed: {status} {body}")
+ghcproxy.credential.device_flow.DeviceFlowError: device code request failed: 404 {'error': 'Not Found'}
+INFO:     127.0.0.1:56484 - "GET /healthz HTTP/1.1" 200 OK
+INFO:     127.0.0.1:37188 - "GET /healthz HTTP/1.1" 200 OK
 
-1. GHC 认证是只需要维护 gho_ 还是需要按长短期两个 token 实现；
-2. 项目中请求 GHC 的请求头是否如 OpenCode/litellm 等实现做了正确处理；
+```
 
-注意多方面获取信息，交叉验证结论。**并且确保先有调研结论，和我确认后再修复实现！！**
+请整体分析 ghc-proxy 项目代码，修复 re-login 行为：
 
+1. 确保 re-login 能正确触发 GitHub Device FLow。
+2. 由于现在看不到 re-login 按钮正确执行的结果，请确保 re-login 按钮成功触发 GitHub Device FLow 后在前端页面弹窗显示一封邮件格式的文本，文本内容为要求用户使用后台返回的device code到指定网址完成登录授权，措辞要专业、礼貌，请用户配合。操作人员会将该邮件格式的文本复制、发送电子邮件给用户，所以请确保弹窗内容有一个复制按钮，方便操作。如果现有实现满足这一点，可以不做修改。
 
 ## 交付条件
 
 1. 如果有变更，要保证前端、后端代码互相功能匹配，实现目标需求。
-3. 文档同步更新：README、设计文档（`ghc-proxy-design.md`）及项目设计过程中创建的示例。
-4. 所有脚本和配置均使用占位符，不写入真实租户 ID、密钥、token 或客户敏感信息。
-5. 利用本地环境 Azure CLI 账号和 Azure 资源执行完整的部署测试。
+2. 文档同步更新：README、设计文档（`ghc-proxy-design.md`）及项目设计过程中创建的示例。
+3. 所有脚本和配置均使用占位符，不写入真实租户 ID、密钥、token 或客户敏感信息。
+4. 利用本地环境 Azure CLI 账号和 Azure 资源执行完整的部署测试。
 
 ## 注意事项
 

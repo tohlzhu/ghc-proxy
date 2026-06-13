@@ -122,6 +122,10 @@ label { display: block; color: var(--muted); margin-bottom: 4px; font-size: 12px
   border-radius: 6px; padding: 12px; word-break: break-all;
   margin: 10px 0;
 }
+/* Re-login email preview: scrollable, preserves the email's line breaks. */
+.email-preview {
+  max-height: 320px; overflow-y: auto; word-break: normal;
+}
 
 .login-wrap { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
 .login-card { width: 360px; }

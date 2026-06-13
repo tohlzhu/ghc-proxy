@@ -50,15 +50,20 @@ class UpstreamConfig(BaseModel):
 
 
 class DeviceFlowConfig(BaseModel):
-    # Public OAuth client id of a Copilot client (not a secret). Which client
-    # you use decides the auth shape the token service must take:
+    # Public OAuth client id of a Copilot client (NOT a secret — it is sent in
+    # the clear on every device-flow request and is published in litellm,
+    # copilot-api, etc.). Which client you use decides the auth shape the token
+    # service must take:
+    #   * CLI OAuth App (``Ov23ctDVkRmgkPke0Mmm``) mints ``gho_`` → used
+    #     DIRECTLY as bearer (token exchange returns 404). This is the default
+    #     and matches integration_id=copilot-developer-cli above.
     #   * Editor GitHub App (e.g. ``Iv1.b507a08c87ecfe98``) mints ``ghu_`` →
     #     must be EXCHANGED at copilot_internal/v2/token for a ~30 min token B.
-    #   * CLI OAuth App (``Ov23...``) mints ``gho_`` → used DIRECTLY as bearer
-    #     (exchange returns 404).
     # The token service supports both (try-exchange, fall back to direct), so
-    # either client works. Placeholder default below; override per deployment.
-    client_id: str = "Iv1.<CLIENT_ID>"
+    # either client works; override per deployment via
+    # GHCPROXY_DEVICE_FLOW__CLIENT_ID. A placeholder value here would make
+    # GitHub's POST /login/device/code return 404 (see device_flow.py guard).
+    client_id: str = "Ov23ctDVkRmgkPke0Mmm"
     scope: str = "read:user"
     device_code_url: str = "https://github.com/login/device/code"
     access_token_url: str = "https://github.com/login/oauth/access_token"

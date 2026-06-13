@@ -47,6 +47,16 @@ class DeviceFlow:
         self._http = http
 
     async def request_device_code(self) -> DeviceCode:
+        # Guard against an unconfigured client_id. A placeholder like
+        # "Iv1.<CLIENT_ID>" makes GitHub answer POST /login/device/code with an
+        # opaque 404; fail fast with an actionable message instead so the
+        # operator knows to set GHCPROXY_DEVICE_FLOW__CLIENT_ID.
+        client_id = self._cfg.client_id
+        if not client_id or "<" in client_id or ">" in client_id:
+            raise DeviceFlowError(
+                f"device flow client_id is not configured ({client_id!r}); "
+                "set GHCPROXY_DEVICE_FLOW__CLIENT_ID to a valid public Copilot "
+                "OAuth client id")
         status, body = await self._http.post_form(
             self._cfg.device_code_url,
             {"client_id": self._cfg.client_id, "scope": self._cfg.scope},

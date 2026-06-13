@@ -228,7 +228,13 @@ def build_admin_router(ctx) -> APIRouter:
         require_admin(x_admin_token)
         if ctx.device_flow is None:
             raise HTTPException(status_code=501, detail="device flow not configured")
-        dc = await ctx.device_flow.request_device_code()
+        try:
+            dc = await ctx.device_flow.request_device_code()
+        except DeviceFlowError as exc:
+            # Upstream (GitHub) rejected the request — e.g. a misconfigured
+            # client_id yields a 404. Surface a clean 502 with a readable
+            # detail rather than letting it bubble up as an opaque 500.
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
         expires_at = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=dc.expires_in)
         account_id, session_id = await ctx.repo.create_device_session(
             login, dc.device_code, dc.user_code, dc.verification_uri,

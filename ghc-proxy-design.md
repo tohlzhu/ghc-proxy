@@ -81,7 +81,9 @@ GHC CLI 把 OAuth token 落盘在 `~/.copilot/config.json`（JSONC 格式，含 
 2. 把 `verification_uri`（`https://github.com/login/device`）与 `user_code`（形如 `XXXX-XXXX`）**吐给操作人员/前端**，由真人在浏览器完成登录与设备授权；
 3. 后台按 `interval` 轮询 `POST https://github.com/login/oauth/access_token`，授权完成后即返回 `gho_` 形态的 `access_token`。
 
-> `client_id` 使用 GHC 客户端公开的 OAuth App ID（示例占位：`Iv1.<CLIENT_ID>`，非密钥）。**该值的选择决定 token 形态与认证路径**：编辑器 GitHub App（如 `Iv1.b507a08c87ecfe98`）签发 `ghu_`，需经 `copilot_internal/v2/token` 换取 token B；CLI OAuth App（`Ov23...`）签发 `gho_`，直连作 Bearer。`CopilotTokenService` 对两者自适应，故任选其一均可工作；按部署需要在 `device_flow.client_id` 配置。
+> `client_id` 使用 GHC 客户端公开的 OAuth App ID（**非密钥**：每次 device-flow 请求都明文携带，litellm/copilot-api 等公开实现亦内置该值）。**该值的选择决定 token 形态与认证路径**：CLI OAuth App（`Ov23ctDVkRmgkPke0Mmm`）签发 `gho_`，直连作 Bearer；编辑器 GitHub App（如 `Iv1.b507a08c87ecfe98`）签发 `ghu_`，需经 `copilot_internal/v2/token` 换取 token B。`CopilotTokenService` 对两者自适应，故任选其一均可工作。**默认值取 CLI 客户端 `Ov23ctDVkRmgkPke0Mmm`**（与 `upstream.integration_id=copilot-developer-cli` 一致，开箱即可发起 Device Flow），按部署需要可在 `device_flow.client_id` 改配。
+>
+> **易错点（Re-login 500 的根因）**：若把 `client_id` 配成占位符（如 `Iv1.<CLIENT_ID>`，含 `<`/`>`），GitHub 对 `POST /login/device/code` 返回 **404 `{"error":"Not Found"}`**，`start_login` 会抛 `DeviceFlowError`。为此 `device_flow.request_device_code()` 在发请求前先校验 `client_id` 不含占位符、否则抛出可读错误；`start_login` 捕获 `DeviceFlowError` 后返回 **502 + 明确文案**（提示去配 `GHCPROXY_DEVICE_FLOW__CLIENT_ID`），而非裸 500。
 
 ### 2.4 凭证保活与刷新（两级自适应）
 
@@ -410,7 +412,7 @@ React + Vite + TypeScript（图表用 Recharts）静态产物由 nginx 托管，
 | **变更账号状态** | `PATCH /admin/accounts/{account_id}/status` | 操作人员可置 `idle|disabled|quarantined`（如解除隔离回 idle、停用账号）；系统态 `logging_in/bound` 不可手动设置，非法值 400。 |
 | **绑定列表** | `GET /admin/bindings` | join `bindings`+`users`+`accounts`：user/account/status/bound_at/last_active_at。 |
 | **手动解绑** | `POST /admin/bindings/{user_id}/release` | 复用 `release_binding`，bound 账号回 idle，发 `binding_released` 审计。 |
-| **Device Flow（既有）** | `POST /admin/accounts/{login}/login/{start,poll}` | 失效账号重登：展示 `user_code`/`verification_uri` 供真人浏览器授权。 |
+| **Device Flow（既有）** | `POST /admin/accounts/{login}/login/{start,poll}` | 失效账号重登：`start` 返回 `user_code`/`verification_uri`，前端据此生成邮件文案；`poll` 轮询授权完成。`start` 在 `client_id` 未配置/上游报错时返回 **502 + 可读 detail**（非 501 仅表示未启用 device flow）。 |
 
 > 用量查询的 `from`/`to` 为可选日期参数，缺省取最近 30 天；非法日期返回 400。
 
@@ -424,7 +426,7 @@ Operator browser ──(X-Admin-Token, 同源)──▶ [console nginx] ──/a
 - **Usage**：四维可视化——日趋势折线、模型占比饼图、账号流量柱状、用户排行表格，附时间窗选择。
 - **Bindings**：1:1 绑定表 + 手动解绑。
 - **Users & Keys**：用户卡片 + Key 元数据表；创建/新增/轮换/吊销；明文 Key 用 copy-once 弹窗仅展示一次。
-- **Accounts**：账号表 + 状态操作（解除隔离/停用/启用）+ Device Flow 弹窗（展示 user_code / verification_uri、轮询）。
+- **Accounts**：账号表 + 状态操作（解除隔离/停用/启用）+ **Re-login（Device Flow）弹窗**。弹窗在成功发起 Device Flow 后，由 `buildReloginEmail()`（`frontend/src/email.ts`，纯函数、含单测）渲染一封**专业、礼貌的邮件文案**——内含 `verification_uri`、`user_code` 与有效期（分钟），引导用户在浏览器完成授权；提供 **「Copy email」** 按钮一键复制整封邮件（Subject + 正文）供操作人员转发，并保留 verification_uri/user_code 速查与「Poll」轮询。邮件文案不含 device_code/session_id/account_id 等内部标识。
 
 ### 11.4 非目标（与既有项目范围一致）
 

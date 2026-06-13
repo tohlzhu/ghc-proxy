@@ -92,7 +92,7 @@ token 解析与缓存由 `CopilotTokenService` 负责：换取所得 token B 在
 | **Usage** | token 用量四维可视化：按时间趋势（折线）、按模型占比（饼图）、按后端账号分布（柱状）、按前端用户排行（表格）。读取 `usage_rollup`，**不读 prompt 明细**。 | `GET /admin/usage/{timeseries,by-user,by-account,by-model}?from&to` |
 | **Bindings** | 查看「用户 ↔ 账号」1:1 粘性绑定（状态/绑定时间/最近活跃），支持手动解绑使账号回 idle。 | `GET /admin/bindings`、`POST /admin/bindings/{user_id}/release` |
 | **Users & Keys** | 列出用户与名下 Key（**仅元数据，不回显明文/哈希**）；创建用户并签发默认 Key；新增 / 轮换 / 吊销 Key；停用 / 启用用户。明文 Key **仅签发瞬间一次性返回**。 | `GET /admin/users`、`PATCH /admin/users/{id}`、`POST /admin/users/{id}/keys`、`POST /admin/keys/{id}/{rotate,revoke}` |
-| **Accounts** | 查看账号池（login/plan/api_base/status/last_error/last_seen/下次刷新）；变更状态（disable / 解除 quarantine 回 idle）；对失效账号发起 Device Flow 重登并展示 `user_code`/`verification_uri`。 | `GET /admin/accounts`、`PATCH /admin/accounts/{id}/status`、`POST /admin/accounts/{login}/login/{start,poll}` |
+| **Accounts** | 查看账号池（login/plan/api_base/status/last_error/last_seen/下次刷新）；变更状态（disable / 解除 quarantine 回 idle）；对失效账号点 **Re-login** 发起 Device Flow，弹窗生成一封**可一键复制的专业邮件**（含 `verification_uri`、`user_code`、有效期）供操作人员转发给用户完成浏览器授权，再「Poll」轮询直至账号回 idle。 | `GET /admin/accounts`、`PATCH /admin/accounts/{id}/status`、`POST /admin/accounts/{login}/login/{start,poll}` |
 
 > 所有新增端点继续走 `require_admin`（静态 admin token）鉴权。Key 一律只存哈希（`api_keys.key_hash`），
 > 面板任何场景都不回显明文或哈希，明文仅在签发瞬间返回一次。
@@ -103,6 +103,7 @@ token 解析与缓存由 `CopilotTokenService` 负责：换取所得 token B 在
 cd frontend
 npm install
 npm run dev          # Vite dev server (http://localhost:5173)，自动把 /admin 反代到 localhost:8080
+npm test             # vitest 前端单测（含 Re-login 邮件文案 buildReloginEmail）
 # 或构建生产产物：
 npm run build        # 产物在 frontend/dist/（已 gitignore）
 ```
@@ -134,7 +135,7 @@ docker-compose 已内置 `console` 服务（见下方快速开始），起栈后
 ├── frontend/                 # 运维管理面板（React + Vite + TS + Recharts）SPA
 │   ├── Dockerfile            # 构建 SPA -> nginx 托管（独立镜像）
 │   ├── nginx.conf            # SPA history fallback + /admin 反向代理
-│   └── src/                  # api.ts + pages/{Login,Usage,Bindings,Users,Accounts}
+│   └── src/                  # api.ts + email.ts（Re-login 邮件文案，含 vitest）+ pages/{Login,Usage,Bindings,Users,Accounts}
 ├── tests/                    # pytest 单元 + 接口测试
 ├── deploy/
 │   ├── docker/docker-compose.yaml   # 全栈：PG/Redis/Kafka/proxy/refresher/console
@@ -186,10 +187,10 @@ curl localhost:8080/v1/messages -H "x-api-key: ghcp_<key>" \
 
 ```bash
 pip install -e ".[dev]"
-pytest -q          # 140 项单元/接口测试，无需外部依赖（含 token service 两级换取 / 请求头派生 / 面板 admin 端点）
+pytest -q          # 156 项单元/接口测试，无需外部依赖（含 token service 两级换取 / 请求头派生 / Device Flow / 面板 admin 端点）
 
-# 面板前端构建（需 Node 18+）
-cd frontend && npm install && npm run build
+# 面板前端：构建 + 单测（需 Node 18+）
+cd frontend && npm install && npm run build && npm test
 ```
 
 ---
@@ -199,8 +200,8 @@ cd frontend && npm install && npm run build
 | 项 | 状态 | 说明 |
 |---|---|---|
 | 可行性（凭证机制） | ✅ | 两级 token 自适应：实测 `gho_`（CLI 客户端）换取端点 404→直连作 Bearer，GPT/Claude/models 均 200；编辑器客户端 `ghu_` 换取 token B 路径由 token service 实现并单测覆盖。 |
-| 单元 + 接口测试 | ✅ | `pytest` 140 项全绿（crypto / 绑定 / 转发改路由 / 流式错误处理 / Device Flow / 用量解析 / 鉴权 / 配置 / 接口 / **token service 两级换取** / **请求头动态派生** / **upstream 接线** / 面板 admin 端点）。 |
-| 面板前端构建 | ✅ | `npm run build` 通过（tsc 严格模式 + Vite 产物）。 |
+| 单元 + 接口测试 | ✅ | `pytest` 156 项全绿（crypto / 绑定 / 转发改路由 / 流式错误处理 / Device Flow（含 client_id 占位符守卫 + start 502 映射）/ 用量解析 / 鉴权 / 配置 / 接口 / **token service 两级换取** / **请求头动态派生** / **upstream 接线** / 面板 admin 端点）。 |
+| 面板前端构建 + 单测 | ✅ | `npm run build` 通过（tsc 严格模式 + Vite 产物）；`npm test` vitest 6 项全绿（Re-login 邮件文案 `buildReloginEmail`）。 |
 | 本地全栈集成 | ✅ | docker-compose 全栈，真实长效凭证经 token service 解析后跑通 GPT + Claude（OpenAI 与 Anthropic 两种协议）+ 流式 + 用量入库 + Kafka 事件；prompt cache 命中实测（`cached_tokens`>0）。 |
 | Azure 云端部署 | ✅ | `rg-dev2`（japaneast）VM 全栈（含 console 面板）；从 `vnet-dev-jpe` 经 VNet Peering 内网调用 GPT/Claude 通过；面板经 admin token 调通各端点。 |
 

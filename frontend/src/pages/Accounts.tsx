@@ -1,12 +1,14 @@
 import { useEffect, useState } from "react";
 import { api, AccountRow, DeviceFlowStart } from "../api";
 import { Badge, ErrorLine, Modal, fmtTime } from "../components";
+import { buildReloginEmail } from "../email";
 
 export default function Accounts() {
   const [rows, setRows] = useState<AccountRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [device, setDevice] = useState<DeviceFlowStart | null>(null);
   const [pollMsg, setPollMsg] = useState<string | null>(null);
+  const [copyMsg, setCopyMsg] = useState<string | null>(null);
 
   const load = async () => {
     setError(null);
@@ -36,10 +38,20 @@ export default function Accounts() {
   const startLogin = async (login: string) => {
     setError(null);
     setPollMsg(null);
+    setCopyMsg(null);
     try {
       setDevice(await api.startLogin(login));
     } catch (e) {
       setError(e instanceof Error ? e.message : "could not start device flow");
+    }
+  };
+
+  const copyEmail = async (text: string) => {
+    try {
+      await navigator.clipboard?.writeText(text);
+      setCopyMsg("Email copied to clipboard.");
+    } catch {
+      setCopyMsg("Copy failed — select the text above and copy manually.");
     }
   };
 
@@ -124,42 +136,51 @@ export default function Accounts() {
         </table>
       </div>
 
-      {device && (
-        <Modal onClose={() => setDevice(null)}>
-          <h3>Device Flow login — {device.login}</h3>
-          <p className="muted">
-            Open the verification URL in a browser, sign in to the GHC account, and enter the
-            code. Then click Poll until the account comes back online.
-          </p>
-          <div className="field">
-            <label>Verification URL</label>
-            <div className="keybox mono">
-              <a href={device.verification_uri} target="_blank" rel="noreferrer">
-                {device.verification_uri}
-              </a>
+      {device && (() => {
+        const email = buildReloginEmail(device);
+        return (
+          <Modal onClose={() => setDevice(null)}>
+            <h3>Device Flow login — {device.login}</h3>
+            <p className="muted">
+              Device Flow started. Copy the email below and send it to the user so they can
+              complete the GitHub authorization in their browser. Then click Poll until the
+              account comes back online.
+            </p>
+
+            <div className="field">
+              <label>Email to send to the user</label>
+              <div className="keybox mono email-preview">
+                <div style={{ fontWeight: 600 }}>Subject: {email.subject}</div>
+                <pre style={{ margin: "8px 0 0", whiteSpace: "pre-wrap", fontFamily: "inherit" }}>
+                  {email.body}
+                </pre>
+              </div>
             </div>
-          </div>
-          <div className="field">
-            <label>User code</label>
-            <div className="keybox mono" style={{ fontSize: 20, letterSpacing: 2 }}>
-              {device.user_code}
+
+            <div className="row">
+              <button onClick={() => copyEmail(email.asPlainText())}>Copy email</button>
+              <button onClick={() => poll(device.login)}>Poll</button>
+              <button className="secondary" onClick={() => setDevice(null)}>
+                Close
+              </button>
             </div>
-          </div>
-          {pollMsg && <p className="muted">{pollMsg}</p>}
-          <div className="row">
-            <button onClick={() => poll(device.login)}>Poll</button>
-            <button
-              className="secondary"
-              onClick={() => navigator.clipboard?.writeText(device.user_code)}
-            >
-              Copy code
-            </button>
-            <button className="secondary" onClick={() => setDevice(null)}>
-              Close
-            </button>
-          </div>
-        </Modal>
-      )}
+            {copyMsg && <p className="muted">{copyMsg}</p>}
+
+            <div className="field" style={{ marginTop: 16 }}>
+              <label>Quick reference (also embedded in the email)</label>
+              <div className="keybox mono">
+                <a href={device.verification_uri} target="_blank" rel="noreferrer">
+                  {device.verification_uri}
+                </a>
+                {"  —  code "}
+                <span style={{ letterSpacing: 2 }}>{device.user_code}</span>
+              </div>
+            </div>
+
+            {pollMsg && <p className="muted">{pollMsg}</p>}
+          </Modal>
+        );
+      })()}
     </div>
   );
 }

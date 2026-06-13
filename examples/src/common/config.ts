@@ -13,8 +13,9 @@ export const config = {
     verificationUri: "https://github.com/login/device",
     // gho_ -> copilot token 交换接口
     tokenExchangePath: "/copilot_internal/v2/token",
-    // GHC 客户端公开 OAuth App ID（占位；公开实现常见 VS Code Copilot 的值）
-    clientId: process.env.GHC_OAUTH_CLIENT_ID ?? "Iv1.<CLIENT_ID>",
+    // GHC 客户端公开 OAuth App ID（非密钥）。默认 CLI OAuth App（颁发 gho_，直连作
+    // Bearer）；如需编辑器客户端改为 Iv1.b507a08c87ecfe98（颁发 ghu_，需换取 token B）。
+    clientId: process.env.GHC_OAUTH_CLIENT_ID ?? "Ov23ctDVkRmgkPke0Mmm",
     scope: process.env.GHC_OAUTH_SCOPE ?? "read:user",
   },
 

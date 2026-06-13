@@ -15,6 +15,21 @@ def test_defaults_match_verified_ghc_client():
     assert "githubcopilot.com" in s.upstream.default_api_base
 
 
+def test_device_flow_client_id_is_a_real_public_client_not_placeholder():
+    """The device-flow client_id must default to a real, public Copilot OAuth
+    client id so Re-login works out of the box. A placeholder like
+    'Iv1.<CLIENT_ID>' makes GitHub's POST /login/device/code return 404. The
+    id is public (not a secret), so a working default is correct here — just
+    like the other upstream defaults above.
+
+    The CLI OAuth App 'Ov23ctDVkRmgkPke0Mmm' mints gho_ tokens used directly as
+    Bearer, consistent with integration_id=copilot-developer-cli."""
+    s = Settings()
+    cid = s.device_flow.client_id
+    assert "<" not in cid and ">" not in cid, f"placeholder client_id: {cid!r}"
+    assert cid == "Ov23ctDVkRmgkPke0Mmm"
+
+
 def test_load_from_yaml(tmp_path):
     key = base64.b64encode(b"\x00" * 32).decode()
     cfg = tmp_path / "c.yaml"

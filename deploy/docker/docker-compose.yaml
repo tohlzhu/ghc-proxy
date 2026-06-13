@@ -59,6 +59,11 @@ services:
       ROLE: proxy
       GHCPROXY_INIT_SCHEMA: "1"
       GHCPROXY_ADMIN_TOKEN: ${ADMIN_TOKEN:-dev_admin_token}
+      # Public OAuth client id for operator Device Flow / Re-login (NOT a secret).
+      # Defaults to the CLI app (gho_, direct Bearer); override to an editor app
+      # (Iv1.*) for the ghu_ -> token B exchange path. A placeholder value here
+      # would make GitHub return 404 on /login/device/code.
+      GHCPROXY_DEVICE_FLOW__CLIENT_ID: ${GHC_OAUTH_CLIENT_ID:-Ov23ctDVkRmgkPke0Mmm}
       GHCPROXY_POSTGRES__URL: postgresql://ghcproxy:${PG_PASSWORD:-ghcproxy_dev_pw}@postgres:5432/ghcproxy
       GHCPROXY_REDIS__URL: redis://redis:6379/0
       GHCPROXY_KAFKA__BROKERS: '["kafka:9092"]'
