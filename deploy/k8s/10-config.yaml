@@ -12,6 +12,10 @@ data:
   GHCPROXY_UPSTREAM__EDITOR_VERSION: "copilot/1.0.61"
   GHCPROXY_UPSTREAM__API_VERSION: "2026-06-01"
   GHCPROXY_UPSTREAM__DEFAULT_API_BASE: "https://api.enterprise.githubcopilot.com"
+  # Public OAuth client id for operator Device Flow login (NOT a secret). The
+  # CLI app below mints gho_ used directly as Bearer; swap for an editor app
+  # (Iv1.*) if you need the ghu_ -> token B exchange path.
+  GHCPROXY_DEVICE_FLOW__CLIENT_ID: "Ov23ctDVkRmgkPke0Mmm"
   GHCPROXY_KAFKA__ENABLED: "true"
   GHCPROXY_REFRESH__SCAN_INTERVAL_S: "60"
 ---

@@ -11,7 +11,7 @@ import httpx
 from ghcproxy.cache import RedisCache
 from ghcproxy.common.config import Settings
 from ghcproxy.common.crypto import TokenCipher
-from ghcproxy.credential.device_flow import DeviceFlow
+from ghcproxy.credential.device_flow import DeviceFlow, DeviceFlowError
 from ghcproxy.credential.token_service import CopilotTokenService
 from ghcproxy.db.repo import PgRepo
 from ghcproxy.observability.sink import KafkaSink, NullSink
@@ -27,7 +27,15 @@ class _HttpxForm:
         self._client = client
 
     async def post_form(self, url, data, headers):
-        resp = await self._client.post(url, data=data, headers=headers)
+        try:
+            resp = await self._client.post(url, data=data, headers=headers)
+        except httpx.HTTPError as exc:
+            # No egress / DNS / TLS / timeout reaching GitHub. Translate to a
+            # DeviceFlowError so the caller (start_login) returns a clean 502
+            # with a readable detail instead of an opaque 500.
+            raise DeviceFlowError(
+                f"could not reach GitHub device-flow endpoint ({url}): "
+                f"{type(exc).__name__}: {exc}") from exc
         try:
             return resp.status_code, resp.json()
         except Exception:
